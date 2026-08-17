@@ -35,6 +35,10 @@ pnpm build
 - 与 dsh-agent-watch 分工：watch 管进程，本插件管插件
 - 每次修改 profile 先备份，预检失败回滚——免疫层兜底
 
+## 相关
+
+- [我的数字生命爱丽丝 — 插件生态中心（架构总览）](https://github.com/jonah791/alice-digital-life)
+
 ## License
 
 MIT
