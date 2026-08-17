@@ -1,0 +1,11 @@
+# dsh-agent-plugin-manager 插件行（示例；实际配置在 web profile 的 cordis.patch.yml 中提供）
+- insert:
+    - id: agent-plugin-manager
+      name: dsh-agent-plugin-manager
+      config:
+        dshHome: C:/Users/tr/.dsh
+        selfPluginsDir: E:/alice/self-plugins
+        profilesDir: C:/Users/tr/.dsh/profiles
+        bin: C:/Users/tr/AppData/Local/npm-cache/_npx/1e7f6d9597241db0/node_modules/@deepseek-ai/dsh/lib/bin.js
+        mainSessionId: ''
+        defaultWorkspace: E:/alice
