@@ -17,18 +17,20 @@ import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
+import type {} from '@deepseek-ai/dsh-session'
 import { buildRegistry, alignWithLoader, readPatch, parsePatchRows, type PluginArchive } from './registry.ts'
 import { patchInsert, patchRemove, patchSetDisabled, patchSetConfig, packageAddLinkDep, packageRemoveDep, installProfile, preflight, rollbackFile } from './profile.ts'
 import { writeSentinel } from './sentinel.ts'
 
 export const name = 'agent-plugin-manager'
-export const inject = ['tools', 'loader'] as const
+export const inject = ['tools', 'loader', 'sessions'] as const
 
 export interface Config {
   dshHome: string
   selfPluginsDir: string
   profilesDir: string
   bin: string
+  /** 可选：显式锁定目标会话（缺省=追踪最新活跃主会话，写入哨兵供 watch 唤醒） */
   mainSessionId: string
   defaultWorkspace: string
   registryFile: string
@@ -82,6 +84,20 @@ function scaffoldSource(name: string, description: string): string {
   ].join('\n') + '\n'
 }
 
+// 目标会话解析：不绑定固定会话——追踪最新活跃主会话（delegationDepth===0 且最后事件 time 最大）；
+// 显式配置 mainSessionId 时仍尊重锁定（兼容旧行为，写入哨兵供 watch 唤醒）。
+function resolveActiveSessionId(ctx: Context, mainSessionId: string): string | null {
+  if (mainSessionId) return mainSessionId
+  let best: { id: string; time: number } | null = null
+  for (const s of (ctx as Context & { sessions?: { list(): { id: string; header?: { delegationDepth?: number }; events: { time: number }[] }[] } }).sessions?.list() ?? []) {
+    if ((s.header?.delegationDepth ?? 0) !== 0) continue
+    const events = s.events
+    const lastTime = events.length > 0 ? (events[events.length - 1]?.time ?? 0) : 0
+    if (best === null || lastTime > best.time) best = { id: s.id, time: lastTime }
+  }
+  return best?.id ?? null
+}
+
 export function createOps(ctx: Context, config: Config, loader: { entries(): Iterable<{ options: { name?: string }; disabled?: boolean }> }): PluginManagerOps {
   const logger = ctx.logger('plugin-manager')
   const require = createRequire(import.meta.url)
@@ -107,7 +123,7 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
     buildRegistry(selfPluginsDir, profilesDir).find((a) => a.name === nm) ?? null
 
   const triggerReload = (note: string) => {
-    const file = writeSentinel(dshHome, { workspace, sessionId, note })
+    const file = writeSentinel(dshHome, { workspace, sessionId: resolveActiveSessionId(ctx, config.mainSessionId) ?? undefined, note })
     eventLog('哨兵已写: ' + file + ' | ' + note)
   }
 
@@ -419,7 +435,7 @@ export function apply(ctx: Context, config: Config): void {
       const dshHome = config.dshHome || process.env.DSH_HOME || ''
       const file = writeSentinel(dshHome, {
         workspace: config.defaultWorkspace || process.cwd(),
-        sessionId: config.mainSessionId,
+        sessionId: resolveActiveSessionId(ctx, config.mainSessionId) ?? undefined,
         note: 'daemon_restart: ' + args.reason.trim() + (args.profile ? ' @' + args.profile : ''),
       })
       try {
