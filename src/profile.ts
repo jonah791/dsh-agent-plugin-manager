@@ -226,7 +226,7 @@ export function installProfile(profileDir: string, timeoutMs = 600000): Promise<
   })
 }
 
-/** 沙盒预检：试运行目标 profile @随机端口，存活 readyMs 即 PASS。 */
+/** 沙盒预检：试运行目标 profile @随机端口，存活 readyMs 即 PASS。失败时打印试运行输出（诊断）。 */
 export function preflight(bin: string, profile: string, workspace: string, readyMs = 20000): Promise<boolean> {
   return new Promise((resolvePromise) => {
     const child = spawn(process.execPath, ['--expose-internals', bin, '--profile', profile, '--port', '0'], { cwd: workspace })
@@ -234,7 +234,16 @@ export function preflight(bin: string, profile: string, workspace: string, ready
     child.stdout.on('data', (d: Buffer) => { out += d })
     child.stderr.on('data', (d: Buffer) => { out += d })
     const timer = setTimeout(() => { child.kill(); resolvePromise(true) }, readyMs)
-    child.on('exit', () => { clearTimeout(timer); resolvePromise(false) })
+    child.on('exit', (code) => {
+      clearTimeout(timer)
+      // 失败必须可见：把试运行输出（含崩溃前的报错）打到日志，不再静默吞
+      if (out.length > 0) {
+        console.error(`[plugin-manager:preflight] 试运行退出 code=${code}（${profile}），输出尾部：\n${out.slice(-4000)}`)
+      } else {
+        console.error(`[plugin-manager:preflight] 试运行退出 code=${code}（${profile}），无输出`)
+      }
+      resolvePromise(false)
+    })
   })
 }
 

@@ -1,3 +1,13 @@
+<!--
+  DSH 插件生态公约声明（plugin-ecosystem-convention · 组合优先/声明清晰/兼容优先）
+  purpose: 插件管理器：插件档案库（清单/用途/工具/配置认知）+ 生命周期管理（创建/挂载/启停/卸载/配置），host 工具面 + 官方设置页「插件管理」tab。
+  inject: 'tools','loader','sessions'
+  tools: plugin_*,daemon_restart
+  runtime: host + client
+  envDeps: 无（纯逻辑/标准 Node）
+  boundary: 无特殊授权边界
+  compat: cordis ^4.0.1 / dsh-tools ^0.1.0-rc.6
+-->
 # dsh-agent-plugin-manager — 插件管理器
 
 DSH（DeepSeek Harness）插件：插件清单与生命周期管理——档案库（来源/版本/用途/工具/配置/状态）+ 创建/启停/改配置/卸载，host 工具面给 agent，client 以「插件管理」tab 挂在官方设置页。
