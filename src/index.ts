@@ -328,12 +328,32 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'plugin_list',
-    description: '列出全部插件档案（来源/版本/用途/工具/挂载状态/配置摘要）——查看有哪些自研或官方插件、各自用途。可选按来源/状态过滤。',
+    description: '列出全部插件档案（来源/版本/用途/工具/挂载状态/配置摘要）——按「自研 / 官方 / 非官方」分组。可选按来源/状态过滤。',
     parameters: {
-      source: { type: 'string', enum: ['self', 'official'], description: '来源过滤' },
+      source: { type: 'string', enum: ['self', 'official', 'third-party'], description: '来源过滤（self=自研, official=官方, third-party=非官方）' },
       status: { type: 'string', enum: ['mounted', 'disabled', 'unmounted'], description: '状态过滤' }
     },
-    output: { schema: { type: 'object', additionalProperties: false, properties: { count: { type: 'number', required: true }, plugins: { type: 'array', required: true, items: { type: 'object', additionalProperties: true } } } }, render: (_a: any, v: any) => [{ type: 'text', text: v.plugins.map((p: any) => '• ' + p.name + ' ' + p.version + ' [' + p.source + '/' + p.status + ']' + (p.built ? '' : ' 未构建') + '\n  ' + p.purpose + (p.tools.length ? '\n  工具: ' + p.tools.join(', ') : '') + (p.profiles.length ? '\n  挂载: ' + p.profiles.join(', ') : '')).join('\n') }] },
+    output: { schema: { type: 'object', additionalProperties: false, properties: { count: { type: 'number', required: true }, plugins: { type: 'array', required: true, items: { type: 'object', additionalProperties: true } } } }, render: (_a: any, v: any) => {
+      const groupMeta: Record<string, { title: string; order: number }> = {
+        self: { title: '▸ 自研', order: 0 },
+        official: { title: '▸ 官方', order: 1 },
+        'third-party': { title: '▸ 非官方（第三方）', order: 2 },
+      }
+      const groups = new Map<string, any[]>()
+      for (const p of v.plugins) {
+        const key = p.source in groupMeta ? p.source : 'third-party'
+        if (!groups.has(key)) groups.set(key, [])
+        groups.get(key)!.push(p)
+      }
+      const lines: string[] = []
+      for (const [key, list] of [...groups.entries()].sort((a, b) => (groupMeta[a[0]]?.order ?? 99) - (groupMeta[b[0]]?.order ?? 99))) {
+        lines.push((groupMeta[key]?.title ?? key) + '（' + list.length + '）')
+        for (const p of list) {
+          lines.push('  • ' + p.name + ' ' + p.version + ' [' + p.status + ']' + (p.built ? '' : ' 未构建') + (p.purpose ? ' — ' + p.purpose : '') + (p.tools.length ? '\n      工具: ' + p.tools.join(', ') : '') + (p.profiles.length ? '\n      挂载: ' + p.profiles.join(', ') : ''))
+        }
+      }
+      return [{ type: 'text', text: lines.join('\n') }]
+    } },
     async execute(args: { source?: string; status?: string }) {
       let plugins = ops.list()
       if (args.source) plugins = plugins.filter((p) => p.source === args.source)

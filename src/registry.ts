@@ -5,11 +5,18 @@
  * @module dsh-agent-plugin-manager/registry
  */
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import yaml from 'js-yaml'
 
-export type PluginSource = 'self' | 'official'
+export type PluginSource = 'self' | 'official' | 'third-party'
 export type PluginStatus = 'mounted' | 'disabled' | 'unmounted'
+
+/**
+ * 来源分组（主人 2026-08-27 定调：自研 / 非自研，非自研下分官方 / 非官方）：
+ * - self = 自研（self-plugins 目录）
+ * - official = 非自研·官方（@deepseek-ai/*）
+ * - third-party = 非自研·非官方（link 到 self-plugins 之外目录的第三方插件，如 dsh-agent-teams @ _tmp_review）
+ */
 
 export interface PluginArchive {
   name: string
@@ -285,6 +292,68 @@ export function scanOfficialBundles(profilesDir: string): PluginArchive[] {
   return [...map.values()].sort((a, b) => a.name.localeCompare(b.name))
 }
 
+/**
+ * 非官方第三方插件档案（主人 2026-08-27：非自研下分官方/非官方）。
+ * 扫描各 profile 的 link: 依赖——目标不在 self-plugins 目录且包名非 @deepseek-ai/ 前缀 = 第三方
+ * （如 dsh-agent-teams @ E:/alice/_tmp_review/）。从 link 目标读 package.json 元数据。
+ */
+export function scanThirdParty(profilesDir: string, selfPluginsDir: string): PluginArchive[] {
+  const map = new Map<string, PluginArchive>()
+  const selfReal = resolve(selfPluginsDir)
+  for (const info of listProfiles(profilesDir)) {
+    const pkg = readProfilePackage(join(profilesDir, info.profile))
+    if (!pkg?.dependencies) continue
+    for (const [name, spec] of Object.entries(pkg.dependencies)) {
+      if (typeof spec !== 'string' || !spec.startsWith('link:')) continue
+      if (name.startsWith('@deepseek-ai/')) continue // 官方
+      const target = spec.slice(5).replaceAll('\\', '/')
+      // 目标在 self-plugins 内 = 自研（跳过）。统一正斜杠比较，避免 Windows 反斜杠分隔符不匹配
+      // （2026-08-27 修复：resolve 在 Windows 下产出反斜杠路径，原判断 selfReal+'/' 混分隔符导致
+      //   compact/memory 等被误判为第三方）。
+      const selfNorm = selfReal.replaceAll('\\', '/')
+      const targetNorm = resolve(target).replaceAll('\\', '/')
+      if (targetNorm === selfNorm || targetNorm.startsWith(selfNorm + '/')) continue
+      const existing = map.get(name)
+      if (existing) {
+        const row = info.rows.find((r) => r.id === name || r.name === name)
+        if (row) {
+          existing.status = row.disabled ? 'disabled' : 'mounted'
+          if (!existing.profiles.includes(info.profile)) existing.profiles.push(info.profile)
+          if (row.config) existing.config = { ...existing.config, ...row.config }
+        }
+        continue
+      }
+      const pkgPath = join(target, 'package.json')
+      let version = ''
+      let purpose = ''
+      if (existsSync(pkgPath)) {
+        try {
+          const p = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: unknown; description?: unknown }
+          if (typeof p.version === 'string') version = p.version
+          if (typeof p.description === 'string') purpose = p.description
+        } catch { /* 忽略 */ }
+      }
+      const row = info.rows.find((r) => r.id === name || r.name === name)
+      map.set(name, {
+        name,
+        version,
+        source: 'third-party',
+        path: target,
+        purpose,
+        category: 'third-party',
+        client: false,
+        tools: [],
+        built: existsSync(pkgPath),
+        status: row ? (row.disabled ? 'disabled' : 'mounted') : 'unmounted',
+        profiles: row ? [info.profile] : [],
+        config: row?.config ?? {},
+        updatedAt: new Date().toISOString(),
+      })
+    }
+  }
+  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
 /** 官方插件目录条目（探索数据：中文简介/类别/client/工具）。 */
 export interface OfficialCatalogEntry {
   name: string
@@ -372,7 +441,13 @@ export function buildRegistry(selfPluginsDir: string, profilesDir: string): Plug
     }
   }
   const systemState = loadSystemState()
-  const all = [...archives, ...officialMap.values()]
+  // 非官方第三方（link 到 self-plugins 之外）：主人 2026-08-27 分类（自研/官方/非官方）
+  // 2026-08-27 修复：thirdParty 排除已在 self archives 里的包名——其他 profile（如 at-test）的 link
+  // 可能指向旧路径（C:/Users/tr/Documents/...），导致 compact/memory 被误判第三方。包名已在自研库 =
+  // 自研优先（一个插件只有一个来源归属）。
+  const selfNames = new Set(archives.map((a) => a.name))
+  const thirdParty = scanThirdParty(profilesDir, selfPluginsDir).filter((a) => !selfNames.has(a.name))
+  const all = [...archives, ...officialMap.values(), ...thirdParty]
   for (const arch of all) {
     const st = systemState[arch.name]
     if (st === 'enabled') { arch.status = 'mounted'; if (!arch.profiles.includes('web')) arch.profiles.push('web') }
