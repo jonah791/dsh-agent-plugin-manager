@@ -120,8 +120,13 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
   const findRow = (profileDir: string, nm: string) =>
     parsePatchRows(readPatch(profileDir)).find((r) => r.id === nm || r.name === nm) ?? null
 
-  const findArchive = (nm: string): PluginArchive | null =>
-    buildRegistry(selfPluginsDir, profilesDir).find((a) => a.name === nm) ?? null
+  const findArchive = (nm: string): PluginArchive | null => {
+    // 与 list() 同源：用运行时 Loader 状态对齐（loader 是权威），避免吃陈旧 system-state 静态快照
+    // 误判 mounted/unmounted（2026-08-30：compact 归一后 dsh-agent-compact 仍被旧快照标 mounted）
+    const arch = buildRegistry(selfPluginsDir, profilesDir).find((a) => a.name === nm)
+    if (!arch) return null
+    return alignWithLoader([arch], loaderSnapshot())[0] ?? null
+  }
 
   const triggerReload = (note: string) => {
     const file = writeSentinel(dshHome, { workspace, sessionId: resolveActiveSessionId(ctx, config.mainSessionId) ?? undefined, note })
