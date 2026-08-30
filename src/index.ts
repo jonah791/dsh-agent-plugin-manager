@@ -6,7 +6,8 @@
  * client 以「插件管理」tab 挂在官方设置页的 Plugins 页面。
  *
  * 安全：每次 profile 文件修改先备份；哨兵触发前沙盒预检（失败回滚不重启）；
- * 卸载保留插件数据目录。与 dsh-agent-watch 分工：watch 管进程，本插件管插件。
+ * 卸载保留插件数据目录。与 watch 守护三件套分工：guardian/sentinel/preflight 管进程，
+ * 本插件管插件（2026-08-30 对齐：旧 dsh-agent-watch 已退役拆分）。
  * @module dsh-agent-plugin-manager
  */
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
