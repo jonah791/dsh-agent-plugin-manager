@@ -258,7 +258,7 @@ export function preflight(opts: {
     bin,
     workspace,
     targetPort: 3080,
-    preflightReadyMs: opts.preflightReadyMs ?? 20000,
+    preflightReadyMs: opts.preflightReadyMs ?? 45000,
     preflightGraceMs: opts.preflightGraceMs ?? 10000,
     probeExistingFirst: opts.probeExistingFirst ?? false,
     log,
