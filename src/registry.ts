@@ -90,19 +90,66 @@ export function parsePatchRows(patchText: string): PatchRow[] {
   return rows
 }
 
-/** 从源码提取 defineTool 注册的工具名。 */
+/** 递归收集 src/ 与 lib/ 下的源码文件（工具可拆分到任意文件，如 lib/tools.js、src/pruner.ts）。 */
+function collectSourceFiles(dir: string): string[] {
+  const out: string[] = []
+  const walk = (d: string): void => {
+    let entries: string[] = []
+    try { entries = readdirSync(d) } catch { return }
+    for (const e of entries) {
+      if (e.startsWith('.')) continue
+      const p = join(d, e)
+      try {
+        if (statSync(p).isDirectory()) {
+          // 只进 src/ 与 lib/（node_modules 等噪音不进）
+          if (e === 'src' || e === 'lib' || (d.endsWith('src') || d.endsWith('lib'))) walk(p)
+        } else if (e.endsWith('.ts') || e.endsWith('.js') || e.endsWith('.mjs')) {
+          out.push(p)
+        }
+      } catch { /* 跳过 */ }
+    }
+  }
+  walk(dir)
+  return out
+}
+
+/** 判断 text 中 index 位置是否处于注释行（行首 * / // / /*，覆盖文档注释与行注释的 name 示例）。 */
+function isCommentLine(text: string, index: number): boolean {
+  const lineStart = text.lastIndexOf('\n', index - 1) + 1
+  const line = text.slice(lineStart, index)
+  const trimmed = line.trim()
+  return trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*')
+}
+
+/** 从源码提取 defineTool 注册的工具名。
+ * 覆盖三种注册形态（2026-09-06 审查修复，见记忆 b6ffdb64）：
+ *  1. 直接字面量：defineTool({ name: 'xxx' })——单/双引号均支持（原只匹配单引号，vision 双引号漏）
+ *  2. 工厂/变量模式：defineTool(tool) + reg({ name: 'xxx' })——文件含 defineTool(变量) 时，
+ *     额外收集该文件所有 name: 'xxx'（排除 export const name = 插件名行；blue-team/red-team 等 6 插件）
+ *  3. 工具拆到其他文件：递归扫 src/ 与 lib/ 全部 .ts/.js（memory→lib/tools.js、context→src/pruner.ts）
+ */
 export function extractTools(dir: string): string[] {
   const tools: string[] = []
-  const candidates = ['lib/index.js', 'lib/remote.js', 'src/index.ts', 'src/index.js']
-  for (const rel of candidates) {
-    const p = join(dir, rel)
-    if (!existsSync(p)) continue
+  for (const p of collectSourceFiles(dir)) {
     let text = ''
     try { text = readFileSync(p, 'utf8') } catch { continue }
-    const re = /defineTool\s*\(\s*\{[\s\S]{0,500}?name:\s*'([a-zA-Z_][\w]*)'/g
+    // 形态 1：直接字面量（单双引号）
+    const re = /defineTool\s*\(\s*\{[\s\S]{0,500}?name:\s*['"]([a-zA-Z_][\w]*)['"]/g
     let m: RegExpExecArray | null
     while ((m = re.exec(text))) {
-      if (m[1] && !tools.includes(m[1])) tools.push(m[1])
+      if (m[1] && !tools.includes(m[1]) && !isCommentLine(text, m.index)) tools.push(m[1])
+    }
+    // 形态 2：工厂/变量模式（defineTool(某标识符) 而非 {）
+    if (/defineTool\s*\(\s*[a-zA-Z_$]/.test(text)) {
+      const re2 = /name:\s*['"]([a-zA-Z_][\w]*)['"]/g
+      while ((m = re2.exec(text))) {
+        if (!m[1] || tools.includes(m[1])) continue
+        if (isCommentLine(text, m.index)) continue // 注释里的 name 示例（如本文档注释）
+        const lineStart = text.lastIndexOf('\n', m.index) + 1
+        const line = text.slice(lineStart, m.index)
+        if (/export\s+const\s+name\b|const\s+name\s*=/.test(line)) continue // 插件名（如 export const name = 'agent-xxx'）
+        tools.push(m[1])
+      }
     }
   }
   return tools.sort()

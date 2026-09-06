@@ -10,7 +10,7 @@
  * 本插件管插件（2026-08-30 对齐：旧 dsh-agent-watch 已退役拆分）。
  * @module dsh-agent-plugin-manager
  */
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, writeFileSync, existsSync, readFileSync, statSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import type { Context } from '@deepseek-ai/cordis'
@@ -49,6 +49,48 @@ export const Config = z.object({
 })
 
 export type { PluginArchive } from './registry.ts'
+
+/**
+ * 组合变更检测（2026-09-05 主人反思「预检为何没拦 inject 缺失」修复）：
+ * self-plugins 任一插件的 lib/index.js mtime 晚于当前 web 进程启动时间 =
+ * 「刚构建、尚未被当前实例加载验证」→ preflight 必须强制完整试运行（probeExistingFirst=false），
+ * 不能靠「现有实例健康」短路（现有实例跑的是旧代码，健康不代表新组合可加载）。
+ * 本插件挂 web profile（进程即 web 实例）→ 用 process.uptime() 反推本进程启动时间。
+ * 扫描失败/无 self-plugins → 保守返回 true（走完整试运行，宁严勿漏）。
+ */
+function hasUnverifiedBuilds(dshHome: string): boolean {
+  try {
+    // 本进程即 web 实例（plugin-manager 挂 web profile）——启动时间 = now - uptime
+    const webStartMs = Date.now() - process.uptime() * 1000
+
+    // 扫 self-plugins：lib/index.js mtime > web 启动 = 未验证的新构建
+    const candidates = [
+      join(dshHome, '..', 'self-plugins'), // E:\alice\.dsh → E:\alice\self-plugins
+      join(process.cwd(), 'self-plugins'),
+      join(dshHome, 'self-plugins'),
+    ]
+    const seen = new Set<string>()
+    for (const dir of candidates) {
+      const real = dir // 不 resolve 符号链接，避免重复
+      if (seen.has(real) || !existsSync(dir)) continue
+      seen.add(real)
+      let entries: string[] = []
+      try { entries = readdirSync(dir) } catch { continue }
+      for (const name of entries) {
+        if (name.startsWith('.')) continue
+        const lib = join(dir, name, 'lib', 'index.js')
+        try {
+          if (existsSync(lib) && statSync(lib).mtimeMs > webStartMs + 1000) {
+            return true
+          }
+        } catch { /* 单插件不可读跳过 */ }
+      }
+    }
+    return false
+  } catch {
+    return true // 异常保守：走完整试运行
+  }
+}
 
 export function publicArchive(a: PluginArchive) {
   return JSON.parse(JSON.stringify({
@@ -92,7 +134,8 @@ function resolveActiveSessionId(ctx: Context, mainSessionId: string): string | n
   let best: { id: string; time: number } | null = null
   for (const s of (ctx as Context & { sessions?: { list(): { id: string; header?: { delegationDepth?: number }; events: { time: number }[] }[] } }).sessions?.list() ?? []) {
     if ((s.header?.delegationDepth ?? 0) !== 0) continue
-    const events = s.events
+    // 2026-09-05 防御：DSH 升级后部分 session 的 events 可能缺失（undefined）——不能直接 .length
+    const events = s.events ?? []
     const lastTime = events.length > 0 ? (events[events.length - 1]?.time ?? 0) : 0
     if (best === null || lastTime > best.time) best = { id: s.id, time: lastTime }
   }
@@ -155,11 +198,12 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
       return { ok: false, error: 'patch 已存在同名行（依赖已回滚）' }
     }
     if (bin) {
-      const pass = await preflight(bin, profile, workspace)
-      if (!pass) {
+      // D1：组合变更后预检必须强制完整试运行（现有实例健康 ≠ 新组合可加载）
+      const pr = await preflight({ bin, profile, workspace, dshHome, probeExistingFirst: false })
+      if (!pr.pass) {
         if (r2.bak) rollbackFile(join(profileDir, 'cordis.patch.yml'), r2.bak)
         if (r1.bak) rollbackFile(join(profileDir, 'package.json'), r1.bak)
-        return { ok: false, error: '预检失败，已回滚（组合无法加载）' }
+        return { ok: false, error: '预检失败，已回滚：' + pr.detail.slice(0, 800) }
       }
     }
     triggerReload('plugin_mount ' + nm + '@' + profile)
@@ -194,11 +238,12 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
       const r = patchSetDisabled(profileDir, row.id, !enabled)
       if (!r.ok) return { ok: false, error: 'patch 写入失败' }
       if (bin) {
-        const pass = await preflight(bin, profile, workspace)
-        if (!pass) {
+        // D1：组合变更后预检必须强制完整试运行
+        const pr = await preflight({ bin, profile, workspace, dshHome, probeExistingFirst: false })
+        if (!pr.pass) {
           if (r.bak) rollbackFile(join(profileDir, 'cordis.patch.yml'), r.bak)
           eventLog('启停预检失败已回滚: ' + nm)
-          return { ok: false, error: '预检失败，已回滚（组合无法加载）' }
+          return { ok: false, error: '预检失败，已回滚：' + pr.detail.slice(0, 800) }
         }
       }
       triggerReload('plugin_' + (enabled ? 'start' : 'stop') + ' ' + nm + '@' + profile)
@@ -226,12 +271,13 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
         }
       }
       if (bin) {
-        const pass = await preflight(bin, profile, workspace)
-        if (!pass) {
+        // D1：组合变更后预检必须强制完整试运行
+        const pr = await preflight({ bin, profile, workspace, dshHome, probeExistingFirst: false })
+        if (!pr.pass) {
           if (r.bak) rollbackFile(join(profileDir, 'cordis.patch.yml'), r.bak)
           if (depBak) rollbackFile(join(profileDir, 'package.json'), depBak)
           eventLog('卸载预检失败已回滚: ' + nm)
-          return { ok: false, error: '预检失败，已回滚（组合无法加载）' }
+          return { ok: false, error: '预检失败，已回滚：' + pr.detail.slice(0, 800) }
         }
       }
       triggerReload('plugin_remove ' + nm + '@' + profile)
@@ -248,10 +294,11 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
       const r = patchSetConfig(profileDir, row.id, cfg)
       if (!r.ok) return { ok: false, error: 'patch 配置写入失败' }
       if (bin) {
-        const pass = await preflight(bin, profile, workspace)
-        if (!pass) {
+        // D1：组合变更后预检必须强制完整试运行
+        const pr = await preflight({ bin, profile, workspace, dshHome, probeExistingFirst: false })
+        if (!pr.pass) {
           if (r.bak) rollbackFile(join(profileDir, 'cordis.patch.yml'), r.bak)
-          return { ok: false, error: '预检失败，已回滚' }
+          return { ok: false, error: '预检失败，已回滚：' + pr.detail.slice(0, 800) }
         }
       }
       triggerReload('plugin_configure ' + nm + '@' + profile)
@@ -329,8 +376,55 @@ export class PluginManagerRemoteService extends TypertRemoteService {
 
 export function apply(ctx: Context, config: Config): void {
   const logger = ctx.logger('plugin-manager')
-  const ops = createOps(ctx, config, ctx.loader)
+  // ctx.loader 类型声明来自 @deepseek-ai/cordis-plugin-loader 的 declare module（副作用 type import）；
+  // 个别 tsc 解析下不生效，这里用结构断言（运行时 inject 'loader' 保证存在）。
+  const loader = (ctx as unknown as { loader: { entries(): Iterable<{ options: { name?: string }; disabled?: boolean }> } }).loader
+  const ops = createOps(ctx, config, loader)
   ctx.plugin(PluginManagerRemoteService, ops)
+
+  const require = createRequire(import.meta.url)
+
+  // ---------- 预检调用记录 + 重启前校验（主人 2026-08-30：重启前必须检查会话中是否调用过预检工具） ----------
+  // 预检工具（preflight_check）被调用时落盘一条记录；daemon_restart 写哨兵前读取并校验。
+  // 「会话过程中」= 记录时间不早于本次 web 进程启动（用 process.uptime 反推）。
+  const dshHome = config.dshHome || process.env.DSH_HOME || ''
+  const invokedFile = join(dshHome, '.preflight-invoked.json')
+  const webStartMs = Date.now() - process.uptime() * 1000
+  const recordPreflightInvoked = (pass: boolean, mode: string): void => {
+    // 2026-09-05 修复：会话解析失败（cordis 严格代理下 ctx.sessions 访问抛错）不得阻断写盘——
+    // 原实现把 resolveActiveSessionId 与 writeFileSync 放在同一 try，解析抛错则记录从未落盘，
+    // preflight_check 却返回「已记录」，导致 daemon_restart 门控误判「非本会话调用」。
+    let sid: string | null = null
+    try { sid = resolveActiveSessionId(ctx, config.mainSessionId) ?? null } catch { sid = null }
+    try {
+      writeFileSync(invokedFile, JSON.stringify({
+        at: new Date().toISOString(), atMs: Date.now(),
+        workspace: config.defaultWorkspace || process.cwd(),
+        sessionId: sid, pass, mode,
+      }, null, 2), 'utf8')
+    } catch (e) { logger.warn('预检记录落盘失败: ' + String(e)) }
+  }
+  const preflightInvokedThisSession = (): { ok: boolean; reason?: string } => {
+    try {
+      if (!existsSync(invokedFile)) {
+        return { ok: false, reason: '本会话未调用过预检工具（preflight_check）' }
+      }
+      const rec = JSON.parse(readFileSync(invokedFile, 'utf8')) as { atMs?: number; workspace?: string; pass?: boolean }
+      if (typeof rec.atMs !== 'number') return { ok: false, reason: '预检记录无效（缺 atMs）' }
+      if (rec.workspace !== (config.defaultWorkspace || process.cwd())) {
+        return { ok: false, reason: '预检记录 workspace 不匹配（记录=' + rec.workspace + '）' }
+      }
+      if (rec.atMs < webStartMs) {
+        return { ok: false, reason: '预检记录早于本次 web 启动（非本会话调用，请先重新调用 preflight_check）' }
+      }
+      if (rec.pass !== true) {
+        return { ok: false, reason: '本会话最近一次预检未通过——重启会被拒绝，请先修复后重新 preflight_check' }
+      }
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, reason: '读取预检记录失败: ' + String(e) }
+    }
+  }
 
   ctx.tools.register(defineTool({
     name: 'plugin_list',
@@ -449,8 +543,39 @@ export function apply(ctx: Context, config: Config): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'preflight_check',
+    description: '预检工具：执行组合试运行预检并落盘「本会话已调用预检」记录（.preflight-invoked.json）。重启（daemon_restart）前必须先调用本工具且预检通过——否则重启会被拒绝。mode=full 完整试运行（~20s），quick 快速（~8s）。',
+    parameters: {
+      mode: { type: 'string', enum: ['full', 'quick'], description: '预检模式（默认 full）' },
+      profile: { type: 'string', description: '目标 profile（默认 web）' }
+    },
+    output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, pass: { type: 'boolean' }, note: { type: 'string' }, error: { type: 'string' } } }, render: (_a: any, v: any) => [{ type: 'text', text: v.ok ? (v.pass ? '预检通过，已记录（可重启）' : '预检未通过（已记录，重启将被拒绝）：' + (v.note ?? '')) : (v.error ?? '') }] },
+    async execute(args: { mode?: string; profile?: string }) {
+      const mode = args.mode === 'quick' ? 'quick' : 'full'
+      const profile = args.profile || 'web'
+      let bin = config.bin
+      if (!bin) { try { bin = require.resolve('@deepseek-ai/dsh/lib/bin.js') } catch { bin = '' } }
+      if (!bin) return { ok: false, error: 'bin 未定位，无法执行预检' }
+      // D1：preflight_check 是「当前组合」检查——目标 profile 是当前 web 实例（默认）时，
+      // 现有实例健康即组合可加载 → probeExistingFirst=true 毫秒级短路；quick 模式无试运行。
+      // 2026-09-05 主人反思修复：改代码后重启 = 组合变更，不能短路——
+      // self-plugins 任一插件的 lib 比当前 web 启动晚（刚构建未验证）→ 强制完整试运行验证新组合。
+      const probeFirst = profile === 'web' && !hasUnverifiedBuilds(dshHome)
+      const pr = await preflight({
+        bin, profile,
+        workspace: config.defaultWorkspace || process.cwd(),
+        dshHome,
+        mode,
+        probeExistingFirst: probeFirst,
+      })
+      recordPreflightInvoked(pr.pass, mode)
+      return { ok: true, pass: pr.pass, note: (mode + ' 预检 ' + (pr.pass ? 'PASS' : 'FAIL') + (pr.pass ? '' : '\n' + pr.detail.slice(0, 600))) }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'daemon_restart',
-    description: '重启 web 守护服务（哨兵协议：预检 → kill+重启 → 唤醒 → 清哨兵）。爱丽丝自主决策用：内存回收/状态清理/任意原因；reason 必填留痕。不改组合，组合预检由守护 v2.3 门控兜底（失败不 kill 旧 web）。',
+    description: '重启 web 守护服务（哨兵协议：预检 → kill+重启 → 唤醒 → 清哨兵）。爱丽丝自主决策用：内存回收/状态清理/任意原因；reason 必填留痕。不改组合，组合预检由守护 v2.3 门控兜底（失败不 kill 旧 web）。重启前会检查本会话是否调用过预检工具（preflight_check）——未调用则拒绝。',
     parameters: {
       reason: { type: 'string', required: true, description: '重启原因（决策记录，记入日志）' },
       profile: { type: 'string', description: '目标 profile（默认 web）' }
@@ -458,10 +583,18 @@ export function apply(ctx: Context, config: Config): void {
     output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, note: { type: 'string' }, error: { type: 'string' } } }, render: (_a: any, v: any) => [{ type: 'text', text: v.ok ? (v.note ?? 'ok') : (v.error ?? '') }] },
     async execute(args: { reason: string; profile?: string }) {
       if (!args.reason || !args.reason.trim()) return { ok: false, error: 'reason 必填（重启是自主决策，必须留痕）' }
+      // 【重启前预检校验 · 主人 2026-08-30】本会话必须调用过预检工具且通过，否则拒绝重启
+      const gate = preflightInvokedThisSession()
+      if (!gate.ok) {
+        return { ok: false, error: '重启被拒绝：' + gate.reason + '。请先调用 preflight_check 预检工具（通过后）再重启。' }
+      }
       const dshHome = config.dshHome || process.env.DSH_HOME || ''
+      // 2026-09-05 容错：会话解析失败（events 缺失/代理抛错）不得阻断写哨兵
+      let sid: string | undefined
+      try { sid = resolveActiveSessionId(ctx, config.mainSessionId) ?? undefined } catch { sid = undefined }
       const file = writeSentinel(dshHome, {
         workspace: config.defaultWorkspace || process.cwd(),
-        sessionId: resolveActiveSessionId(ctx, config.mainSessionId) ?? undefined,
+        sessionId: sid,
         note: 'daemon_restart: ' + args.reason.trim() + (args.profile ? ' @' + args.profile : ''),
       })
       try {

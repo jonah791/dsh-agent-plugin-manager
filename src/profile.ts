@@ -1,12 +1,17 @@
 /**
  * profile 操作：cordis.patch.yml 行级编辑（保留注释）、package.json 依赖、
  * pnpm install、沙盒预检、备份回滚。全部操作先备份，失败可恢复。
+ *
+ * D1 preflight 唯一化（2026-09-03）：preflight() 不再自带第二套简陋 spawn 实现，
+ * 改调 dsh-agent-preflight/core 的 runPreflightCore（与 watch 内 preflight 服务同源）。
  * @module dsh-agent-plugin-manager/profile
  */
 import { readFileSync, writeFileSync, copyFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { spawn } from 'node:child_process'
 import yaml from 'js-yaml'
+import { runPreflightCore } from 'dsh-agent-preflight/core'
 
 function backupFile(path: string): string | null {
   try {
@@ -226,24 +231,57 @@ export function installProfile(profileDir: string, timeoutMs = 600000): Promise<
   })
 }
 
-/** 沙盒预检：试运行目标 profile @随机端口，存活 readyMs 即 PASS。失败时打印试运行输出（诊断）。 */
-export function preflight(bin: string, profile: string, workspace: string, readyMs = 20000): Promise<boolean> {
-  return new Promise((resolvePromise) => {
-    const child = spawn(process.execPath, ['--expose-internals', bin, '--profile', profile, '--port', '0'], { cwd: workspace })
-    let out = ''
-    child.stdout.on('data', (d: Buffer) => { out += d })
-    child.stderr.on('data', (d: Buffer) => { out += d })
-    const timer = setTimeout(() => { child.kill(); resolvePromise(true) }, readyMs)
-    child.on('exit', (code) => {
-      clearTimeout(timer)
-      // 失败必须可见：把试运行输出（含崩溃前的报错）打到日志，不再静默吞
-      if (out.length > 0) {
-        console.error(`[plugin-manager:preflight] 试运行退出 code=${code}（${profile}），输出尾部：\n${out.slice(-4000)}`)
-      } else {
-        console.error(`[plugin-manager:preflight] 试运行退出 code=${code}（${profile}），无输出`)
-      }
-      resolvePromise(false)
-    })
+/**
+ * 沙盒预检：调共享核心 runPreflightCore（与 watch 内 dsh-agent-preflight 同源）。
+ * probeExistingFirst=true：现有实例健康即 PASS（当前组合检查，毫秒级）；
+ * false：强制完整试运行（组合变更后验证新组合——现有实例健康不代表新组合可加载）。
+ *
+ * 返回结构化结果 { pass, detail }：detail 含失败检查明细（不再只 console.error——
+ * 调用方把它带回工具返回，主人/爱丽丝可见，2026-09-04 主人指示完善报错机制）。
+ */
+export function preflight(opts: {
+  bin: string
+  profile: string
+  workspace: string
+  dshHome: string
+  probeExistingFirst?: boolean
+  mode?: 'full' | 'quick'
+  preflightReadyMs?: number
+  preflightGraceMs?: number
+  log?: (msg: string) => void
+}): Promise<{ pass: boolean; detail: string }> {
+  const { bin, profile, workspace, dshHome } = opts
+  const log = opts.log ?? ((msg: string) => { console.error('[plugin-manager:preflight] ' + msg) })
+  return runPreflightCore({
+    dshHome: dshHome || process.env.DSH_HOME || workspace,
+    profile,
+    bin,
+    workspace,
+    targetPort: 3080,
+    preflightReadyMs: opts.preflightReadyMs ?? 20000,
+    preflightGraceMs: opts.preflightGraceMs ?? 10000,
+    probeExistingFirst: opts.probeExistingFirst ?? false,
+    log,
+  }, opts.mode ?? 'full').then((r) => {
+    if (!r.pass) {
+      const failed = Object.entries(r.checks).filter(([, c]) => !c.ok).map(([k, c]) => `  - ${k}: ${c.detail}`)
+      const detail = `预检 FAIL（${profile}）：\n${failed.join('\n') || '（无检查明细）'}`
+      console.error('[plugin-manager:preflight] ' + detail.replace(/\n/g, '\n  '))
+      // 自动落盘报告（可查，2026-09-04 主人指示：报错机制完善，避免手动跑）
+      try {
+        const reportPath = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'preflight-fail-report.json')
+        writeFileSync(reportPath, JSON.stringify({
+          at: new Date().toISOString(),
+          profile,
+          workspace,
+          pass: false,
+          checks: Object.fromEntries(Object.entries(r.checks).map(([k, c]) => [k, { ok: c.ok, detail: c.detail }])),
+        }, null, 2), 'utf-8')
+        console.error('[plugin-manager:preflight] 报告已落盘: ' + reportPath)
+      } catch { /* 落盘失败不阻塞 */ }
+      return { pass: false, detail }
+    }
+    return { pass: true, detail: '预检 PASS' }
   })
 }
 

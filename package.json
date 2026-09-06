@@ -22,7 +22,8 @@
               ],
     "license":  "MIT",
     "dependencies":  {
-                         "js-yaml":  "^4.1.0"
+                         "js-yaml":  "^4.1.0",
+                         "dsh-agent-preflight":  "link:E:/alice/self-plugins/dsh-agent-preflight"
                      },
     "peerDependencies":  {
                              "@deepseek-ai/cordis":  "^4.0.1",

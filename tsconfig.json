@@ -22,15 +22,7 @@
     "rewriteRelativeImportExtensions": true,
     "types": [
       "node"
-    ],
-    "paths": {
-      "@deepseek-ai/cordis-plugin-loader": [
-        "C:/Users/tr/.dsh/profiles/node_modules/@deepseek-ai/cordis-plugin-loader/lib/types/index.d.ts"
-      ],
-      "@deepseek-ai/cordis-plugin-loader/*": [
-        "C:/Users/tr/.dsh/profiles/node_modules/@deepseek-ai/cordis-plugin-loader/lib/types/*"
-      ]
-    }
+    ]
   },
   "include": [
     "src"
