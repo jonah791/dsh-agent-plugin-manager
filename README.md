@@ -10,6 +10,12 @@
 -->
 # dsh-agent-plugin-manager — 插件管理器
 
+
+<p align="center">
+  <a href="https://github.com/jonah791/dsh-agent-plugin-manager"><img src="https://img.shields.io/badge/version-0.1.1-blue" alt="version"></a>
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
+  <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
+</p>
 DSH（DeepSeek Harness）插件：插件清单与生命周期管理——档案库（来源/版本/用途/工具/配置/状态）+ 创建/启停/改配置/卸载，host 工具面给 agent，client 以「插件管理」tab 挂在官方设置页。
 
 ## 功能特性
