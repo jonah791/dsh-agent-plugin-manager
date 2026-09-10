@@ -258,7 +258,14 @@ export function preflight(opts: {
     bin,
     workspace,
     targetPort: 3080,
-    preflightReadyMs: opts.preflightReadyMs ?? 45000,
+    // 试运行就绪预算（2026-09-10 实测校准）：本组合已挂 48 个插件，冷启动实测约 40s
+    // （Node 起 + loader 解析 + 各插件 apply，其中 skill-forge 索引约 6s）。
+    // 原 45000ms 与实测值贴边 → 组合变更预检偶发「HTTP 探活超时」假 FAIL
+    // （2026-09-10 部署 dsh-video-studio 时复现：同一组合手动冷启 40s 就绪 HTTP 401，预检却判超时）。
+    // 假 FAIL 的代价不小：它会拦住合法重启，并诱使人「重跑碰运气」（违反 5.9 的探测纪律）。
+    // 故提到 90000ms（实测 2.25x 余量）；watch profile 的 sentinel 预检本就配 60000ms，
+    // 这里取更宽值以覆盖组合继续增长的空间。此为纯放宽：预检项本身不变，不会降低检出力。
+    preflightReadyMs: opts.preflightReadyMs ?? 90000,
     preflightGraceMs: opts.preflightGraceMs ?? 10000,
     probeExistingFirst: opts.probeExistingFirst ?? false,
     log,
