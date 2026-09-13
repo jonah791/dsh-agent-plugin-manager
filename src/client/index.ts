@@ -37,16 +37,11 @@ export function apply(ctx: ClientContext): void {
       await ctx.plugin({
         name: 'plugin-manager-ui',
         inject: ['slots', 'remote', 'remote.pluginManager'],
-        apply: (child) => {
-          child.slots.inject(
-            'conversation.session.header.actions',
-            () => child.slots.register({
-              name: 'conversation.session.header.actions',
-              id: 'plugin-manager',
-              order: 40, // 任务板(order 30)旁边
-              inject: () => ({ remote: child.remote }),
-            }, PluginManagerAction),
-          )
+        apply: () => {
+          // 2026-09-13 撤除 GUI 槽位（主人定调：GUI 只留 1 个入口——面板宿主的「面板」按钮）：
+          // 原此处注册 `conversation.session.header.actions` 的「插件」按钮（id=plugin-manager order=40）。
+          // 插件管理的界面已迁为面板宿主里的一页（dsh-panel `panels/plugin-manager.ts`，id=plugin-manager）。
+          // 保留 $mount 与 typert remote（宿主侧能力不受影响）；要恢复入口即在此重新 register。
         },
       })
       console.info('[plugin-manager] ui ready')
