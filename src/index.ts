@@ -21,6 +21,7 @@ import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-session'
 import { buildRegistry, alignWithLoader, readPatch, parsePatchRows, type PluginArchive } from './registry.ts'
 import { patchInsert, patchRemove, patchSetDisabled, patchSetConfig, packageAddLinkDep, packageRemoveDep, installProfile, preflight, rollbackFile } from './profile.ts'
+import { decidePreflightGate, extractCaller, callerComparison, describeCaller, type CallerInfo, type GateDecision, type PreflightRecord } from './preflight-gate.ts'
 import { writeSentinel } from './sentinel.ts'
 
 export const name = 'agent-plugin-manager'
@@ -390,40 +391,43 @@ export function apply(ctx: Context, config: Config): void {
   const dshHome = config.dshHome || process.env.DSH_HOME || ''
   const invokedFile = join(dshHome, '.preflight-invoked.json')
   const webStartMs = Date.now() - process.uptime() * 1000
-  const recordPreflightInvoked = (pass: boolean, mode: string): void => {
+  const recordPreflightInvoked = (pass: boolean, mode: string, caller: CallerInfo | null): void => {
     // 2026-09-05 修复：会话解析失败（cordis 严格代理下 ctx.sessions 访问抛错）不得阻断写盘——
     // 原实现把 resolveActiveSessionId 与 writeFileSync 放在同一 try，解析抛错则记录从未落盘，
     // preflight_check 却返回「已记录」，导致 daemon_restart 门控误判「非本会话调用」。
+    // 2026-09-12（t-a2385a9f）：`sessionId` 是**历史遗留字段**——它等于 resolveActiveSessionId 的结果
+    // （当前活跃/主会话），**不是调用者**；**真实调用者记在 `caller`**（来自 exec.agent），排查看 caller。
     let sid: string | null = null
     try { sid = resolveActiveSessionId(ctx, config.mainSessionId) ?? null } catch { sid = null }
     try {
       writeFileSync(invokedFile, JSON.stringify({
         at: new Date().toISOString(), atMs: Date.now(),
         workspace: config.defaultWorkspace || process.cwd(),
-        sessionId: sid, pass, mode,
+        sessionId: sid, pass, mode, caller: caller ?? null,
       }, null, 2), 'utf8')
     } catch (e) { logger.warn('预检记录落盘失败: ' + String(e)) }
   }
-  const preflightInvokedThisSession = (): { ok: boolean; reason?: string } => {
+  /** 读取落盘记录（**不吞异常**：读盘/解析问题经 issue 显式返回，不伪装成「没调用过」）。 */
+  const readPreflightRecord = (): { rec: PreflightRecord | null; issue?: string } => {
     try {
-      if (!existsSync(invokedFile)) {
-        return { ok: false, reason: '本会话未调用过预检工具（preflight_check）' }
-      }
-      const rec = JSON.parse(readFileSync(invokedFile, 'utf8')) as { atMs?: number; workspace?: string; pass?: boolean }
-      if (typeof rec.atMs !== 'number') return { ok: false, reason: '预检记录无效（缺 atMs）' }
-      if (rec.workspace !== (config.defaultWorkspace || process.cwd())) {
-        return { ok: false, reason: '预检记录 workspace 不匹配（记录=' + rec.workspace + '）' }
-      }
-      if (rec.atMs < webStartMs) {
-        return { ok: false, reason: '预检记录早于本次 web 启动（非本会话调用，请先重新调用 preflight_check）' }
-      }
-      if (rec.pass !== true) {
-        return { ok: false, reason: '本会话最近一次预检未通过——重启会被拒绝，请先修复后重新 preflight_check' }
-      }
-      return { ok: true }
+      if (!existsSync(invokedFile)) return { rec: null }
+      return { rec: JSON.parse(readFileSync(invokedFile, 'utf8')) as PreflightRecord }
     } catch (e) {
-      return { ok: false, reason: '读取预检记录失败: ' + String(e) }
+      return { rec: null, issue: '读取/解析失败: ' + String(e) }
     }
+  }
+  /**
+   * 门控裁决（**进程级判据**，见 AGENTS.md §5.11 §3：不比对 sessionId——这是设计如此，不是漏洞）。
+   * 2026-09-12 修复（t-a2385a9f）：① 记录真实调用者（exec.agent）② 文案不再冒充「本会话」
+   * ③ 每次裁决带证据行（谁按的按钮），让「为什么我的重启能过闸」可回答。
+   */
+  const preflightInvokedInProcess = (): GateDecision => {
+    const { rec, issue } = readPreflightRecord()
+    if (issue !== undefined) return { ok: false, reason: '预检记录不可读（' + issue + '）', evidence: '记录不可读' }
+    return decidePreflightGate(rec, {
+      workspace: config.defaultWorkspace || process.cwd(),
+      webStartMs,
+    })
   }
 
   ctx.tools.register(defineTool({
@@ -544,13 +548,13 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'preflight_check',
-    description: '预检工具：执行组合试运行预检并落盘「本会话已调用预检」记录（.preflight-invoked.json）。重启（daemon_restart）前必须先调用本工具且预检通过——否则重启会被拒绝。mode=full 完整试运行（~20s），quick 快速（~8s）。',
+    description: '预检工具：执行组合试运行预检并落盘「本 web 进程内已调用预检」记录（.preflight-invoked.json，含**真实调用者**）。重启（daemon_restart）前必须先调用本工具且预检通过——否则重启会被拒绝。判据是进程级（§5.11 §3），调用者身份作证据留痕。mode=full 完整试运行（~20s），quick 快速（~8s）。',
     parameters: {
       mode: { type: 'string', enum: ['full', 'quick'], description: '预检模式（默认 full）' },
       profile: { type: 'string', description: '目标 profile（默认 web）' }
     },
     output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, pass: { type: 'boolean' }, note: { type: 'string' }, error: { type: 'string' } } }, render: (_a: any, v: any) => [{ type: 'text', text: v.ok ? (v.pass ? '预检通过，已记录（可重启）' : '预检未通过（已记录，重启将被拒绝）：' + (v.note ?? '')) : (v.error ?? '') }] },
-    async execute(args: { mode?: string; profile?: string }) {
+    async execute(args: { mode?: string; profile?: string }, exec) {
       const mode = args.mode === 'quick' ? 'quick' : 'full'
       const profile = args.profile || 'web'
       let bin = config.bin
@@ -568,23 +572,33 @@ export function apply(ctx: Context, config: Config): void {
         mode,
         probeExistingFirst: probeFirst,
       })
-      recordPreflightInvoked(pr.pass, mode)
-      return { ok: true, pass: pr.pass, note: (mode + ' 预检 ' + (pr.pass ? 'PASS' : 'FAIL') + (pr.pass ? '' : '\n' + pr.detail.slice(0, 600))) }
+      const caller = extractCaller(exec)
+      recordPreflightInvoked(pr.pass, mode, caller)
+      return { ok: true, pass: pr.pass, note: (mode + ' 预检 ' + (pr.pass ? 'PASS' : 'FAIL') + '\n调用者: ' + describeCaller(caller) + (pr.pass ? '' : '\n' + pr.detail.slice(0, 600))) }
     },
   }))
 
   ctx.tools.register(defineTool({
     name: 'daemon_restart',
-    description: '重启 web 守护服务（哨兵协议：预检 → kill+重启 → 唤醒 → 清哨兵）。爱丽丝自主决策用：内存回收/状态清理/任意原因；reason 必填留痕。不改组合，组合预检由守护 v2.3 门控兜底（失败不 kill 旧 web）。重启前会检查本会话是否调用过预检工具（preflight_check）——未调用则拒绝。',
+    description: '重启 web 守护服务（哨兵协议：预检 → kill+重启 → 唤醒 → 清哨兵）。爱丽丝自主决策用：内存回收/状态清理/任意原因；reason 必填留痕。不改组合，组合预检由守护 v2.3 门控兜底（失败不 kill 旧 web）。重启前检查**本 web 进程内**是否调用过预检工具（preflight_check）——未调用则拒绝（进程级判据，§5.11 §3）。',
     parameters: {
       reason: { type: 'string', required: true, description: '重启原因（决策记录，记入日志）' },
       profile: { type: 'string', description: '目标 profile（默认 web）' }
     },
     output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, note: { type: 'string' }, error: { type: 'string' } } }, render: (_a: any, v: any) => [{ type: 'text', text: v.ok ? (v.note ?? 'ok') : (v.error ?? '') }] },
-    async execute(args: { reason: string; profile?: string }) {
+    async execute(args: { reason: string; profile?: string }, exec) {
       if (!args.reason || !args.reason.trim()) return { ok: false, error: 'reason 必填（重启是自主决策，必须留痕）' }
-      // 【重启前预检校验 · 主人 2026-08-30】本会话必须调用过预检工具且通过，否则拒绝重启
-      const gate = preflightInvokedThisSession()
+      // 【重启前预检校验 · 主人 2026-08-30】本 web 进程内必须调用过预检工具且通过，否则拒绝重启。
+      // 判据是**进程级**（AGENTS.md §5.11 §3：不比对 sessionId，这是设计如此）；调用者身份只作证据留痕。
+      const gate = preflightInvokedInProcess()
+      const caller = extractCaller(exec)
+      const evLine = 'daemon_restart 门控证据：' + gate.evidence + ' · 调用者比对：' + callerComparison(readPreflightRecord().rec, caller) + ' · 结论=' + (gate.ok ? '放行' : '拒绝（' + (gate.reason ?? '') + '）')
+      logger.info(evLine)
+      try {
+        const fs = await import('node:fs')
+        const dir = config.dshHome || process.env.DSH_HOME || ''
+        if (dir) fs.appendFileSync(join(dir, '.plugin-manager-events.log'), '[' + new Date().toISOString() + '] ' + evLine + '\n')
+      } catch { /* 证据行落盘失败不阻断重启判定 */ }
       if (!gate.ok) {
         return { ok: false, error: '重启被拒绝：' + gate.reason + '。请先调用 preflight_check 预检工具（通过后）再重启。' }
       }
