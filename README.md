@@ -11,10 +11,10 @@
 # dsh-agent-plugin-manager
 
 <p align="center">
-  <a href="https://github.com/jonah791/dsh-agent-plugin-manager"><img src="https://img.shields.io/badge/version-0.1.1-blue" alt="version"></a>
+  <a href="https://github.com/jonah791/dsh-agent-plugin-manager"><img src="https://img.shields.io/badge/version-0.1.2-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
-  <img src="https://img.shields.io/badge/tests-49%20passed-brightgreen" alt="tests">
+  <img src="https://img.shields.io/badge/tests-54%20passed-brightgreen" alt="tests">
 </p>
 
 **一句话**：DSH 的**插件档案库 + 生命周期操作面**——把「有哪些插件、什么来源、挂到哪个 profile、装了什么工具、配置是什么」变成一条命令可查，把「创建 / 挂载 / 启停 / 卸载 / 改配置」做成**带备份与回滚的闭环**，并附带一道会**拒绝执行**的重启闸门。
@@ -155,18 +155,19 @@ stat -c '%y' self-plugins/dsh-agent-plugin-manager/lib/index.js   # ① 本插�
 npm run build && npm test     # test = node --test "tests/*.test.mjs" "test/*.test.mjs"
 ```
 
-**49 例离线测试，全部 pass**（实跑：`# tests 49 / # pass 49 / # fail 0`，约 583ms）。测试**从 `../lib/*.js` 导入**（与运行时同源），所以脚本本身不含 `tsc`——改源码后必须先 `npm run build`，否则跑的是旧产物（假绿陷阱）。
+**54 例离线测试，全部 pass**（实跑：`# tests 54 / # pass 54 / # fail 0`）。测试**从 `../lib/*.js` 导入**（与运行时同源），所以脚本本身不含 `tsc`——改源码后必须先 `npm run build`，否则跑的是旧产物（假绿陷阱）。
 
 | 文件 | 例数 | 覆盖 |
 |------|------|------|
 | `tests/ops-logic.test.mjs` | 19 | 纯决策逻辑：档案过滤、插件名校验、loader 快照映射、活跃会话挑选、列表渲染、脚手架生成（含空描述/无 `dsh-` 前缀的保守占位） |
 | `test/preflight-gate.test.mjs` | 14 | **重启闸门**：`decidePreflightGate` 四条判据（未调用 / 预检未过 / 记录不可读 / 时间早于进程启动）+ 调用者提取与比对文案 |
 | `test/registry.test.mjs` | 12 | 档案库：`parsePatchRows`（行解析）、`extractTools`、`isBuilt`、`patchInsert/patchSetDisabled/patchSetConfig/patchRemove` 行编辑、`packageAddLinkDep/packageRemoveDep`、`buildRegistry` 对账 |
+| `tests/registry-deps.test.mjs` | 5 | **第三方盘点（§5.23）**：`classifyDependency` 七档（自研 link / 本地 link / 官方 / git pin / tarball / registry / `file:`）、`redactSpec` 脱敏（pin 保留）、`scanThirdParty` 夹具（git-pin 带 `dsh.profile.bundles` ⇒ `bundle=true` 且 `mounted`；registry 未安装 ⇒ `unmounted`、版本留空）、**尸体测试**（profiles 路径不存在 → 空列表不抛） |
 | `tests/event-log.test.mjs` | 4 | 事件日志薄壳：行格式、**尸体测试**（不可写路径 → 返回 `false` 且**不抛**） |
 
 **无需网络、无需真实外部依赖**（`pnpm`、`dsh` bin、真实 profile 在测试中都不触碰；临时目录用 `mkdtempSync`）。
 
-**未覆盖**（诚实声明）：挂载/卸载/启停/`daemon_restart` 的**端到端**路径（真改 profile → 真预检 → 真回滚 → 真写哨兵）没有自动化测试——那会触发真实重启；`registry.ts` 的官方 bundles / 第三方扫描分支亦无夹具。对应缺口见 [`docs/semantic.md`](docs/semantic.md) §10 U4。
+**未覆盖**（诚实声明）：挂载/卸载/启停/`daemon_restart` 的**端到端**路径（真改 profile → 真预检 → 真回滚 → 真写哨兵）没有自动化测试——那会触发真实重启；`registry.ts` 的官方 bundles 分支仍无夹具（**第三方四形态已覆盖**，见上表）。对应缺口见 [`docs/semantic.md`](docs/semantic.md) §10 U4/U6。
 
 ## 设计要点
 
@@ -175,6 +176,8 @@ npm run build && npm test     # test = node --test "tests/*.test.mjs" "test/*.te
 - **不变量 I3 挂载状态以 loader 为权威**：`plugin_list` 的 `status` 与 `ctx.loader.entries()` 一致（`alignWithLoader`）；静态快照（`data/system-state.json`）只作补充。历史事故：陈旧快照把已归一的插件仍标 `mounted`。
 - **不变量 I4 重启走进程级闸门**：`daemon_restart` 的判据是「**本 web 进程启动后**是否调用过 `preflight_check` 且最近一次 `pass === true`」——**不比对 sessionId**（设计如此，§5.11 §3）；`.preflight-invoked.json` 不可读/坏 JSON 时 **fail-closed 拒绝**。`sessionId` 字段是历史遗留，真实调用者记在 `caller`，门控**不用它**做判断，只作证据留痕。
 - **不变量 I5 卸载保留数据**：`plugin_unmount` 只移除 patch 行与 link 依赖，**不删插件目录**。
+- **第三方按「安装形态」枚举，不按某一种形态写死**（§5.23，2026-09-14 修）：第三方档认五种落点——`link:`（本地 clone）、`git pin`（`github:owner/repo#ref`）、codeload `tarball`、registry 版本号、`file:`；档案额外带 `bundle`（列在 profile 的 `dsh.profile.bundles` ⇒ **自述式挂载**，不由 patch 行挂）与 `spec`（含 pin，升级/回退唯一指纹，落盘前经 `redactSpec` 脱敏）。
+  **历史缺陷**：原实现是 `if (!spec.startsWith('link:')) continue`——只认本地 clone 形态，于是 `github:…#commit` 这种依赖**整条被跳过**；主人新装的第三方插件在 `plugin_list --source third-party` 里查无此人（实测返回空）。教训：**盘点器跟着「包管理器形态」演化，而不是跟着某次实现的假设**。
 - **不变量 I6 只读面永不抛**：`plugin_list`/`plugin_inspect` 对坏包、缺失目录逐目录 `try/catch` 跳过并继续；`loadSystemState`/`loadOfficialCatalog` 读不到返回 `{}`/`[]`。
 - **`pnpm install --package-import-method=copy`**：copy 导入方式绕开 Windows 上 link/rename 的 EPERM（`spawn(..., { shell: true })`）。
 - **预检本体零重复实现**：`profile.ts:preflight()` 是 `dsh-agent-preflight` 的 `runPreflightCore` 薄封装，预算 `preflightReadyMs = 90000`（为 48 插件组合实测约 40s 留 2.25x 余量）。

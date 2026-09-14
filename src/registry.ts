@@ -40,6 +40,48 @@ export interface PluginArchive {
   /** patch 中的配置快照。 */
   config: Record<string, unknown>
   updatedAt: string
+  /** 第三方专用：是否以 bundle 形态挂载（列在 profile 的 `dsh.profile.bundles`）。 */
+  bundle?: boolean
+  /** 第三方专用：依赖声明原文（含 pin；**已脱敏**）——升级/回退靠它。 */
+  spec?: string
+}
+
+/**
+ * 依赖声明的档位（纯函数判定；`third-party-*` 四档 = 非自研、非官方）。
+ *
+ * 2026-09-14 修（主人「我安装了一个第三方插件」暴露的仪器缺陷）：
+ * 原实现只认 **`link:` 形态**的第三方（`spec.startsWith('link:')` 之外一律 `continue`），
+ * 于是 `github:owner/repo#commit` 这类 **git pin / bundle 形态**的第三方被整条跳过——
+ * 「非自研插件」的盘点因此不完整。现在四种安装形态都认。
+ */
+export type DepKind =
+  | 'self-link'            // link: → self-plugins/<name>
+  | 'local-link'           // link: → 其他本地路径
+  | 'official'             // @deepseek-ai/*
+  | 'third-party-git'      // github:owner/repo#ref / git+ / git@ / *.git
+  | 'third-party-tarball'  // https://…/tar.gz#<sha>
+  | 'third-party-local'    // file:
+  | 'third-party-registry' // 版本号（npm registry）
+
+export function classifyDependency(name: string, spec: string): DepKind {
+  const s = spec.trim()
+  if (name.startsWith('@deepseek-ai/')) return 'official'
+  if (s.startsWith('link:')) return /(^|[\\/])self-plugins[\\/]/.test(s) ? 'self-link' : 'local-link'
+  if (s.startsWith('file:')) return 'third-party-local'
+  if (s.startsWith('github:') || s.startsWith('git+') || s.startsWith('git:') || s.startsWith('git@')) return 'third-party-git'
+  if (/^https?:\/\//i.test(s)) return /\.git(#|$)/i.test(s) ? 'third-party-git' : 'third-party-tarball'
+  return 'third-party-registry'
+}
+
+export function isThirdPartyDep(kind: DepKind): boolean {
+  return kind.startsWith('third-party-')
+}
+
+/** 脱敏依赖声明（URL userinfo / token 类参数不落盘；pin 本身必须留）。 */
+export function redactSpec(spec: string): string {
+  return spec
+    .replace(/\/\/[^/@\s]+@/g, '//')
+    .replace(/([?&](?:token|access_token|auth|api_?key|password|secret)=)[^&\s]+/gi, '$1[redacted]')
 }
 
 /** patch 中的一行插件（id/name/disabled/config）。 */
@@ -347,32 +389,43 @@ export function scanOfficialBundles(profilesDir: string): PluginArchive[] {
 export function scanThirdParty(profilesDir: string, selfPluginsDir: string): PluginArchive[] {
   const map = new Map<string, PluginArchive>()
   const selfReal = resolve(selfPluginsDir)
+  // 统一正斜杠比较，避免 Windows 反斜杠分隔符不匹配
+  // （2026-08-27 修复：resolve 在 Windows 下产出反斜杠路径，原判断 selfReal+'/' 混分隔符导致
+  //   compact/memory 等被误判为第三方）。
+  const selfNorm = selfReal.replaceAll('\\', '/')
   for (const info of listProfiles(profilesDir)) {
-    const pkg = readProfilePackage(join(profilesDir, info.profile))
+    const profileDir = join(profilesDir, info.profile)
+    const pkg = readProfilePackage(profileDir)
     if (!pkg?.dependencies) continue
     for (const [name, spec] of Object.entries(pkg.dependencies)) {
-      if (typeof spec !== 'string' || !spec.startsWith('link:')) continue
-      if (name.startsWith('@deepseek-ai/')) continue // 官方
-      const target = spec.slice(5).replaceAll('\\', '/')
-      // 目标在 self-plugins 内 = 自研（跳过）。统一正斜杠比较，避免 Windows 反斜杠分隔符不匹配
-      // （2026-08-27 修复：resolve 在 Windows 下产出反斜杠路径，原判断 selfReal+'/' 混分隔符导致
-      //   compact/memory 等被误判为第三方）。
-      const selfNorm = selfReal.replaceAll('\\', '/')
-      const targetNorm = resolve(target).replaceAll('\\', '/')
-      if (targetNorm === selfNorm || targetNorm.startsWith(selfNorm + '/')) continue
+      if (typeof spec !== 'string') continue
+      const kind = classifyDependency(name, spec)
+      if (!isThirdPartyDep(kind)) continue
+      // 落点解析：link: → 目标目录；其余形态（git pin / tarball / registry / file）→ 装在该 profile 的 node_modules 下
+      const isLink = spec.startsWith('link:')
+      const target = isLink ? resolve(spec.slice(5).replaceAll('\\', '/')) : join(profileDir, 'node_modules', name)
+      if (isLink) {
+        const targetNorm = target.replaceAll('\\', '/')
+        if (targetNorm === selfNorm || targetNorm.startsWith(selfNorm + '/')) continue // 自研，跳过
+      }
+      // bundle 形态 = 自述式挂载（包自带 dsh.bundle.patch，列进 dsh.profile.bundles）
+      const bundle = info.bundles.includes(name)
+      const row = info.rows.find((r) => r.id === name || r.name === name)
+      const mounted = bundle || (row !== undefined && !row.disabled)
       const existing = map.get(name)
       if (existing) {
-        const row = info.rows.find((r) => r.id === name || r.name === name)
-        if (row) {
+        if (row !== undefined) {
           existing.status = row.disabled ? 'disabled' : 'mounted'
-          if (!existing.profiles.includes(info.profile)) existing.profiles.push(info.profile)
           if (row.config) existing.config = { ...existing.config, ...row.config }
+        } else if (bundle) {
+          existing.status = 'mounted'
         }
+        if (mounted && !existing.profiles.includes(info.profile)) existing.profiles.push(info.profile)
         continue
       }
-      const pkgPath = join(target, 'package.json')
       let version = ''
       let purpose = ''
+      const pkgPath = join(target, 'package.json')
       if (existsSync(pkgPath)) {
         try {
           const p = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: unknown; description?: unknown }
@@ -380,7 +433,6 @@ export function scanThirdParty(profilesDir: string, selfPluginsDir: string): Plu
           if (typeof p.description === 'string') purpose = p.description
         } catch { /* 忽略 */ }
       }
-      const row = info.rows.find((r) => r.id === name || r.name === name)
       map.set(name, {
         name,
         version,
@@ -391,10 +443,12 @@ export function scanThirdParty(profilesDir: string, selfPluginsDir: string): Plu
         client: false,
         tools: [],
         built: existsSync(pkgPath),
-        status: row ? (row.disabled ? 'disabled' : 'mounted') : 'unmounted',
-        profiles: row ? [info.profile] : [],
+        status: row?.disabled === true ? 'disabled' : (mounted ? 'mounted' : 'unmounted'),
+        profiles: mounted ? [info.profile] : [],
         config: row?.config ?? {},
         updatedAt: new Date().toISOString(),
+        bundle,
+        spec: redactSpec(spec),
       })
     }
   }

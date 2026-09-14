@@ -5,7 +5,7 @@
 | 能力名 | dsh-agent-plugin-manager（插件内 `name = 'agent-plugin-manager'`；组合行 id `agent-plugin-manager`） |
 | 主副本路径 | `self-plugins/dsh-agent-plugin-manager/docs/semantic.md` |
 | 实现落点 | `self-plugins/dsh-agent-plugin-manager/src/index.ts`（工具面 + 预检门控 + 重启闸门）<br>`.../src/registry.ts`（档案库纯函数：扫描/对账/工具提取）<br>`.../src/profile.ts`（patch 行编辑 / link 依赖 / pnpm install / 预检 / 回滚）<br>`.../src/preflight-gate.ts`（门控纯逻辑：调用者提取 + 进程级裁决）<br>`.../src/sentinel.ts`（哨兵写入）<br>`.../src/client/index.ts` + `src/client/remote.ts` + `src/client/PluginManagerAction.tsx`（client 面） |
-| 版本 | 0.1.1（`package.json`） |
+| 版本 | 0.1.2（`package.json`） |
 | 挂载位置 | `E:\alice\.dsh\profiles\web\cordis.patch.yml` 第 77 行 `- insert:` / 第 78 行 `- id: agent-plugin-manager` / 第 79 行 `name: dsh-agent-plugin-manager`；第 80–85 行 `config`（`dshHome: E:/alice/.dsh`、`selfPluginsDir: E:/alice/self-plugins`、`profilesDir: E:/alice/.dsh/profiles`、`bin: E:/alice/deepseek-harness/apps/cli/lib/bin.js`、`defaultWorkspace: E:/alice`） |
 | 状态 | **draft**（补课文档：语义已从源码读出，验收条目多数待线上复核） |
 | 依赖服务 | `inject = ['tools', 'loader', 'sessions']`（运行时全量；`ctx.loader.entries()` 是挂载状态的权威源） |
@@ -88,8 +88,8 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
 ### 4.2 工具面（10 个，`src/index.ts`）
 | 工具 | 注册行 | 作用 | 关键裁决 |
 |------|-------|------|---------|
-| `plugin_list` | L410–411 | 档案列表（按 `source`/`status` 过滤，分组渲染） | 状态经 loader 对齐（I3） |
-| `plugin_inspect` | L427–428 | 单插件深度档案 | 不存在 → `ok:false` |
+| `plugin_list` | L410–411 | 档案列表（按 `source`/`status` 过滤，分组渲染） | 状态经 loader 对齐（I3）；**第三方档覆盖四种安装形态**（见 §4.3「第三方盘点」行，2026-09-14 修） |
+| `plugin_inspect` | L427–428 | 单插件深度档案 | 不存在 → `ok:false`（第三方档命中后不再误报「不存在」） |
 | `plugin_create` | L438–439 | 生成脚手架（`package.json`/`tsconfig.json`/`src/index.ts`/`README.md`） | 目录已存在 / 名字非法 → `ok:false` |
 | `plugin_mount` | L451–452 | link 依赖 + install + patch insert + 预检 + 哨兵 | 已挂载 / 官方 bundle / profile 不存在 → 拒绝 |
 | `plugin_unmount` | L465–466 | patch 移除 + 依赖移除 + install + 预检 + 哨兵 | 未挂载 → 拒绝；数据目录保留（I5） |
@@ -119,8 +119,9 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
 | client remote 契约 | `src/client/remote.ts:39 TYPERT_REMOTE`（`service: 'pluginManagerRemote'`，`namespace: 'pluginManager'`，方法 `list/inspect/start/stop/unmount/create`）；host 侧 `src/index.ts:321 PluginManagerRemoteService`（`@Remote` 于 L327/331/336/340/345/349） | 面板/客户端调用 |
 | 落盘产物 | `<DSH_HOME>/.hot-reload-flag`（哨兵）<br>`<DSH_HOME>/.plugin-manager-events.log`（事件行 `[ISO] msg`，L144）<br>`<DSH_HOME>/.preflight-invoked.json`（`at/atMs/workspace/sessionId/pass/mode/caller`，L369/371）<br>`<DSH_HOME>/preflight-fail-report.json`（`src/profile.ts:279`，仅预检 FAIL 时）<br>`<profileDir>/cordis.patch.yml.bak-<ts>`、`<profileDir>/package.json.bak-<ts>` | 操作时 |
 | 只读数据源 | `self-plugins/*/package.json`、`data/official-plugins.json`、`data/system-state.json`、各 profile 的 `cordis.patch.yml` + `package.json` + `node_modules/<bundle>/package.json` | 查询时 |
+| **第三方盘点** | `registry.ts:classifyDependency(name, spec)`（纯函数：`self-link`/`local-link`/`official`/`third-party-{git,tarball,registry,local}`）+ `scanThirdParty(profilesDir, selfPluginsDir)`：**四种安装形态全覆盖**——`link:`（落点 = link 目标）与 git pin / tarball / registry / `file:`（落点 = `<profileDir>/node_modules/<name>`）；`bundle` = 列在该 profile 的 `dsh.profile.bundles`（自述式挂载 ⇒ mounted）；`spec` 经 `redactSpec` 脱敏后进档案（升级/回退的唯一指纹） | `plugin_list`/`plugin_inspect`（§5.23） |
 | 消费方 | 爱丽丝（`plugin_list`/`plugin_inspect` 认知插件面；`plugin_mount` 等实施部署）；`daemon_restart` 被「重启前必须先预检」纪律消费；watch（哨兵文件）；面板宿主 `dsh-panel` 的 `plugin-manager` 面板（经 remote） | 运行时 |
-| 测试 | `test/registry.test.mjs`（12 条：parsePatchRows/extractTools/isBuilt/patch* 行编辑/依赖增删/`buildRegistry` 对账）<br>`test/preflight-gate.test.mjs`（门控裁决与调用者提取）<br>（`test/debug.mjs`、`test/only-registry.mjs` 为手工调试脚本，非 `node --test` 命名）<br>**2026-09-14 另一并行实例新增** `tests/event-log.test.mjs`、`tests/ops-logic.test.mjs`（未提交，见 §8 并行写入声明；`package.json` 的 `test` 脚本已扩为 `"tests/*.test.mjs" "test/*.test.mjs"`） | 离线 |
+| 测试 | `test/registry.test.mjs`（12 条：parsePatchRows/extractTools/isBuilt/patch* 行编辑/依赖增删/`buildRegistry` 对账）<br>`test/preflight-gate.test.mjs`（门控裁决与调用者提取）<br>`tests/event-log.test.mjs`、`tests/ops-logic.test.mjs`<br>`tests/registry-deps.test.mjs`（**2026-09-14 新增**：第三方四形态判定 + 脱敏 + `scanThirdParty` 夹具〔git-pin 带 bundle ⇒ mounted；registry 未安装 ⇒ unmounted/版本留空〕+ 路径不存在不抛）<br>（`test/debug.mjs`、`test/only-registry.mjs` 为手工调试脚本，非 `node --test` 命名）<br>跑法：`npm test` = `node --test "tests/*.test.mjs" "test/*.test.mjs"` | 离线 |
 
 ## 5 · 边界与信任
 
@@ -165,6 +166,8 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
 | A7 | 事件日志吞错不阻断（观测不反噬主流程） | `grep -n "appendLineSafe\|catch" src/event-log.ts`（返回 bool、不抛）+ `.plugin-manager-events.log` 存在且末行格式 `[ISO] 消息` | 待验收 |
 | A8 | 卸载保留插件数据目录 | `plugin_unmount` 后 `self-plugins/<name>/` 仍存在，仅 patch 行与 `link:` 依赖消失 | 待验收 |
 | A9 | client 槽位已撤除（GUI 单一入口 = 面板宿主） | `grep -n "session.header.actions" src/client/index.ts` 无注册语句（仅注释） | 已实测（独立复核：仅 L42 注释命中） |
+| A10 | **第三方四种安装形态全部可盘点**（git pin / tarball / registry / `file:`）；`link:` 到 self-plugins 的自研**不混入**；bundle 形态标 `bundle=true` 且判 mounted | `node --test tests/registry-deps.test.mjs`（夹具：git-pin 带 `dsh.profile.bundles` ⇒ mounted；registry 未安装 ⇒ unmounted 且版本留空；自研/官方不入第三方档） | 已证（单测；线上见 A11） |
+| A11 | 线上 `plugin_list --source third-party` 能看到 bundle 形态的第三方（此前为空） | 重启后调 `plugin_list {source:'third-party'}` → 含 `dsh-x-opencode-session`（bundle=true、spec 带 commit pin） | **待线上验收**（判据 = 该行出现；修前实测为空列表） |
 
 ## 8 · 与实现的关系
 
@@ -183,6 +186,10 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
   - 语义**被补充**：三处散落产物此前未在任何文档成文——`<DSH_HOME>/.plugin-manager-events.log`（并行实例协调的判据，§5.22 要求的侧车轨迹）、`<DSH_HOME>/.preflight-invoked.json`（含 `caller` 真实调用者）、`<DSH_HOME>/preflight-fail-report.json`（预检 FAIL 自动落盘报告）。
   - 语义**被修正**：无（首次成文）；但记录两处「文案与事实不符」的历史订正已在源码注释中（`sessionId` 字段不是调用者；闸门不比对会话 id，见 `preflight-gate.ts` 头注）。
   - 教训：**契约表必须写「实际使用」列**——`registryFile` 这类「声明了但没人读」的字段只有把声明与使用并排比对才看得出来；只抄 schema 会把死配置当成能力写进文档。
+- **2026-09-14 §5.23 修仪器：第三方档只认 `link:` 形态（0.1.2）**
+  - 现场：主人装了 `dsh-x-opencode-session`（依赖声明 `github:Coco-king/…#commit` + `dsh.profile.bundles`），实测 `plugin_list --source third-party` **返回空**——`scanThirdParty` 第 354 行 `if (!spec.startsWith('link:')) continue` 把 git pin / tarball / registry 三种形态整条跳过；「非自研插件」的盘点因此不完整。
+  - 修法：抽出**纯函数** `classifyDependency(name, spec)` 七档（自研 link / 本地 link / 官方 / 第三方四形态）+ `redactSpec` 脱敏；`scanThirdParty` 按形态解析落点（`link:` → 目标目录；其余 → `<profileDir>/node_modules/<name>`）；档案新增 `bundle`（自述式挂载 ⇒ mounted）与 `spec`（升级/回退指纹）。
+  - 教训：**「第三方 = 本地 clone 链接进来」是 2026-08 的世界观**——包管理器形态一变（git pin/bundle），盘点器就静默失灵；**盘点器必须按「安装形态」枚举，而不是按某一种形态的特例写死**。与本次 `dsh-plugin-bootreport` 的同类缺口（只扫 self-plugins）同源，两处一并修（§5.23）。
 
 ## 10 · 未决问题
 
@@ -191,3 +198,4 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
 - **U3 README 与实现漂移**：README 工具表 7 项 vs 实际 10 项、来源三类 vs README 两类——是否把 `preflight_check`/`daemon_restart` 补进 README？（补课纪律：本文只报不改，处置归主体）
 - **U4 端到端验收缺口**：A4/A6/A8 需要「真改一个 profile 再回滚」的破坏性实验，代价是可能触发重启——是否值得为它造一个一次性 sandbox profile（如 `at-test`）来跑？（倾向：值得，用 `at-test` profile 隔离）
 - **U5 并行实例写入**：本仓库正被另一实例重构（§8 声明）。补课文档与重构结果谁先合入、行号以哪版为准——需队长在收口时统一复读一次。
+- **U6 第三方档的下一步（§5.23）**：① `plugin_mount` 对第三方**应当显式拒绝**并指路 `dsh plugin --profile <p> add`（当前会走到「已挂载 / 目录不存在」分支，文案不达意）；② 第三方升级/回退要不要做成工具（换 pin + 重装 + 重启 = 现在只能手改 profile `package.json`）；③ `plugin_unmount` 对 bundle 形态的语义（删 `dsh.profile.bundles` 条目？还是只从依赖移除？）——三条都需要主人定调或至少一次实测，本次只做「看得见」。

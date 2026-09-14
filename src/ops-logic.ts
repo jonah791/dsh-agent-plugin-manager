@@ -92,6 +92,10 @@ export function publicArchive(a: PluginArchive) {
     purpose: a.purpose, category: a.category, client: a.client,
     tools: a.tools, built: a.built,
     status: a.status, profiles: a.profiles, config: a.config,
+    // 第三方档专有（§5.23）：bundle = 自述式挂载；spec = 依赖声明（含 pin，落盘前已脱敏）
+    // 注：不投影 `path`（本地绝对路径不属工具面白名单）
+    ...(a.bundle === undefined ? {} : { bundle: a.bundle }),
+    ...(a.spec === undefined ? {} : { spec: a.spec }),
   }))
 }
 
@@ -131,15 +135,16 @@ export function groupOrderedPlugins<T extends { source: string }>(
     .map(([key, items]) => ({ key, title: GROUP_META[key]?.title ?? key, order: GROUP_META[key]?.order ?? 99, items }))
 }
 
-/** 档案行（一个插件一行，含「未构建」标记 / 工具 / 挂载）——与原 render 逐字一致。 */
+/** 档案行（一个插件一行，含「未构建」标记 / 工具 / 挂载；第三方档额外标 bundle 与 pin，§5.23）。 */
 export function pluginListLines(plugins: Array<{
   source: string; name: string; version: string; status: string; built: boolean; purpose: string; tools: string[]; profiles: string[]
+  bundle?: boolean; spec?: string
 }>): string[] {
   const lines: string[] = []
   for (const g of groupOrderedPlugins(plugins)) {
     lines.push(g.title + '（' + g.items.length + '）')
     for (const p of g.items) {
-      lines.push('  • ' + p.name + ' ' + p.version + ' [' + p.status + ']' + (p.built ? '' : ' 未构建') + (p.purpose ? ' — ' + p.purpose : '') + (p.tools.length ? '\n      工具: ' + p.tools.join(', ') : '') + (p.profiles.length ? '\n      挂载: ' + p.profiles.join(', ') : ''))
+      lines.push('  • ' + p.name + ' ' + p.version + ' [' + p.status + ']' + (p.built ? '' : ' 未构建') + (p.purpose ? ' — ' + p.purpose : '') + (p.tools.length ? '\n      工具: ' + p.tools.join(', ') : '') + (p.profiles.length ? '\n      挂载: ' + p.profiles.join(', ') : '') + (p.bundle === undefined ? '' : '\n      bundle: ' + String(p.bundle)) + (p.spec === undefined ? '' : '\n      来源: ' + p.spec))
     }
   }
   return lines
