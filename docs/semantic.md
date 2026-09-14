@@ -167,7 +167,7 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
 | A8 | 卸载保留插件数据目录 | `plugin_unmount` 后 `self-plugins/<name>/` 仍存在，仅 patch 行与 `link:` 依赖消失 | 待验收 |
 | A9 | client 槽位已撤除（GUI 单一入口 = 面板宿主） | `grep -n "session.header.actions" src/client/index.ts` 无注册语句（仅注释） | 已实测（独立复核：仅 L42 注释命中） |
 | A10 | **第三方四种安装形态全部可盘点**（git pin / tarball / registry / `file:`）；`link:` 到 self-plugins 的自研**不混入**；bundle 形态标 `bundle=true` 且判 mounted | `node --test tests/registry-deps.test.mjs`（夹具：git-pin 带 `dsh.profile.bundles` ⇒ mounted；registry 未安装 ⇒ unmounted 且版本留空；自研/官方不入第三方档） | 已证（单测；线上见 A11） |
-| A11 | 线上 `plugin_list --source third-party` 能看到 bundle 形态的第三方（此前为空） | 重启后调 `plugin_list {source:'third-party'}` → 含 `dsh-x-opencode-session`（bundle=true、spec 带 commit pin） | **待线上验收**（判据 = 该行出现；修前实测为空列表） |
+| A11 | 线上 `plugin_list --source third-party` 能看到 bundle 形态的第三方（此前为空） | 重启后调 `plugin_list {source:'third-party'}` → 含 `dsh-x-opencode-session`（bundle=true、spec 带 commit pin） | **已证（2026-09-14 15:47:57 重启后实测）**：`▸ 非官方（第三方）（1）• dsh-x-opencode-session 0.1.0 [mounted]` + `挂载: web` + `bundle: true` + `来源: github:Coco-king/dsh-x-opencode-session#2e7ce82…`；修前同一调用返回空列表 |
 
 ## 8 · 与实现的关系
 
