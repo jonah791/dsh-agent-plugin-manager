@@ -32,6 +32,8 @@ import {
   pluginListLines,
   publicArchive,
   scaffoldSource,
+  thirdPartyRefusal,
+  type LifecycleAction,
   type SessionListItem,
 } from './ops-logic.ts'
 import { appendLineSafe, formatEventLine } from './event-log.ts'
@@ -160,10 +162,25 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
     eventLog('哨兵已写: ' + file + ' | ' + note)
   }
 
+  /**
+   * 第三方插件的生命周期拦截（§5.23）：返回拒绝对象（`{ok:false,error}`）或 null（放行）。
+   * 自研走 link 依赖 + patch 行；第三方走 profile 依赖（registry/git pin）+ 包自带 bundle patch——
+   * 用自研路径操作第三方会写出错误形态，故**显式拒绝并指路**。
+   */
+  const refuseThirdParty = (arch: PluginArchive | null, action: LifecycleAction, nm: string, profile: string) => {
+    if (arch === null || arch.source !== 'third-party') return null
+    return {
+      ok: false as const,
+      error: thirdPartyRefusal(action, nm, arch.spec ?? '(依赖声明未记录)', profile, arch.bundle === true),
+    }
+  }
+
   const mount = async (nm: string, profile: string, cfg?: Record<string, unknown>) => {
     const arch = findArchive(nm)
     if (!arch) return { ok: false, error: '插件不存在: ' + nm }
     if (arch.source === 'official') return { ok: false, error: '官方 bundle 无需挂载（bundles 列表自带）' }
+    const tp = refuseThirdParty(arch, 'mount', nm, profile)
+    if (tp) return tp
     if (arch.status !== 'unmounted') return { ok: false, error: '已挂载到 ' + arch.profiles.join(', ') + '（如需换 profile 请先卸载）' }
     const dir = arch.path
     if (!dir) return { ok: false, error: '插件目录缺失' }
@@ -208,6 +225,8 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
     async setEnabled(nm, profile, enabled) {
       const arch = findArchive(nm)
       if (!arch) return { ok: false, error: '插件不存在: ' + nm }
+      const tp = refuseThirdParty(arch, enabled ? 'start' : 'stop', nm, profile)
+      if (tp) return tp
       const profileDir = join(profilesDir, profile)
       if (!existsSync(join(profileDir, 'cordis.patch.yml'))) return { ok: false, error: 'profile 不存在: ' + profile }
       const row = findRow(profileDir, nm)
@@ -232,6 +251,8 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
     async remove(nm, profile) {
       const arch = findArchive(nm)
       if (!arch) return { ok: false, error: '插件不存在: ' + nm }
+      const tp = refuseThirdParty(arch, 'unmount', nm, profile)
+      if (tp) return tp
       const profileDir = join(profilesDir, profile)
       const row = findRow(profileDir, nm)
       if (!row) return { ok: false, error: '插件未挂载到 ' + profile }
@@ -266,6 +287,8 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
     async configure(nm, profile, cfg) {
       const arch = findArchive(nm)
       if (!arch) return { ok: false, error: '插件不存在: ' + nm }
+      const tp = refuseThirdParty(arch, 'configure', nm, profile)
+      if (tp) return tp
       const profileDir = join(profilesDir, profile)
       const row = findRow(profileDir, nm)
       if (!row) return { ok: false, error: '插件未挂载到 ' + profile }

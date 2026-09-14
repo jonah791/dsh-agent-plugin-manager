@@ -5,7 +5,7 @@
 | 能力名 | dsh-agent-plugin-manager（插件内 `name = 'agent-plugin-manager'`；组合行 id `agent-plugin-manager`） |
 | 主副本路径 | `self-plugins/dsh-agent-plugin-manager/docs/semantic.md` |
 | 实现落点 | `self-plugins/dsh-agent-plugin-manager/src/index.ts`（工具面 + 预检门控 + 重启闸门）<br>`.../src/registry.ts`（档案库纯函数：扫描/对账/工具提取）<br>`.../src/profile.ts`（patch 行编辑 / link 依赖 / pnpm install / 预检 / 回滚）<br>`.../src/preflight-gate.ts`（门控纯逻辑：调用者提取 + 进程级裁决）<br>`.../src/sentinel.ts`（哨兵写入）<br>`.../src/client/index.ts` + `src/client/remote.ts` + `src/client/PluginManagerAction.tsx`（client 面） |
-| 版本 | 0.1.2（`package.json`） |
+| 版本 | 0.1.3（`package.json`） |
 | 挂载位置 | `E:\alice\.dsh\profiles\web\cordis.patch.yml` 第 77 行 `- insert:` / 第 78 行 `- id: agent-plugin-manager` / 第 79 行 `name: dsh-agent-plugin-manager`；第 80–85 行 `config`（`dshHome: E:/alice/.dsh`、`selfPluginsDir: E:/alice/self-plugins`、`profilesDir: E:/alice/.dsh/profiles`、`bin: E:/alice/deepseek-harness/apps/cli/lib/bin.js`、`defaultWorkspace: E:/alice`） |
 | 状态 | **draft**（补课文档：语义已从源码读出，验收条目多数待线上复核） |
 | 依赖服务 | `inject = ['tools', 'loader', 'sessions']`（运行时全量；`ctx.loader.entries()` 是挂载状态的权威源） |
@@ -91,10 +91,10 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
 | `plugin_list` | L410–411 | 档案列表（按 `source`/`status` 过滤，分组渲染） | 状态经 loader 对齐（I3）；**第三方档覆盖四种安装形态**（见 §4.3「第三方盘点」行，2026-09-14 修） |
 | `plugin_inspect` | L427–428 | 单插件深度档案 | 不存在 → `ok:false`（第三方档命中后不再误报「不存在」） |
 | `plugin_create` | L438–439 | 生成脚手架（`package.json`/`tsconfig.json`/`src/index.ts`/`README.md`） | 目录已存在 / 名字非法 → `ok:false` |
-| `plugin_mount` | L451–452 | link 依赖 + install + patch insert + 预检 + 哨兵 | 已挂载 / 官方 bundle / profile 不存在 → 拒绝 |
-| `plugin_unmount` | L465–466 | patch 移除 + 依赖移除 + install + 预检 + 哨兵 | 未挂载 → 拒绝；数据目录保留（I5） |
-| `plugin_start` / `plugin_stop` | 循环注册 L478（`name` 由 `toolName` 计算） | `disabled` 切换 + 预检 + 哨兵 | 已是目标状态 → 拒绝 |
-| `plugin_configure` | L493–494 | patch `config` **整体替换** + 预检 + 哨兵 | 未挂载 → 拒绝 |
+| `plugin_mount` | L451–452 | link 依赖 + install + patch insert + 预检 + 哨兵 | 已挂载 / 官方 bundle / profile 不存在 → 拒绝；**第三方 → 显式拒绝并指路**（`thirdPartyRefusal`，§5.23） |
+| `plugin_unmount` | L465–466 | patch 移除 + 依赖移除 + install + 预检 + 哨兵 | 未挂载 → 拒绝；数据目录保留（I5）；**第三方 → 显式拒绝**（第三方卸载走 `dsh plugin remove`） |
+| `plugin_start` / `plugin_stop` | 循环注册 L478（`name` 由 `toolName` 计算） | `disabled` 切换 + 预检 + 哨兵 | 已是目标状态 → 拒绝；**第三方 → 显式拒绝**（bundle 形态无 patch 行可控） |
+| `plugin_configure` | L493–494 | patch `config` **整体替换** + 预检 + 哨兵 | 未挂载 → 拒绝；**第三方 → 显式拒绝**（其配置由 profile 依赖与包自身约定决定） |
 | `preflight_check` | L507–508 | 试运行预检 + 落盘调用记录 | `profile==='web'` 且无未验证构建 → 短路（`probeExistingFirst=true`） |
 | `daemon_restart` | L539–540 | 闸门校验通过 → 写哨兵请求重启 | 未调用过预检 / 预检未过 → **拒绝**（I4） |
 
@@ -168,6 +168,7 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
 | A9 | client 槽位已撤除（GUI 单一入口 = 面板宿主） | `grep -n "session.header.actions" src/client/index.ts` 无注册语句（仅注释） | 已实测（独立复核：仅 L42 注释命中） |
 | A10 | **第三方四种安装形态全部可盘点**（git pin / tarball / registry / `file:`）；`link:` 到 self-plugins 的自研**不混入**；bundle 形态标 `bundle=true` 且判 mounted | `node --test tests/registry-deps.test.mjs`（夹具：git-pin 带 `dsh.profile.bundles` ⇒ mounted；registry 未安装 ⇒ unmounted 且版本留空；自研/官方不入第三方档） | 已证（单测；线上见 A11） |
 | A11 | 线上 `plugin_list --source third-party` 能看到 bundle 形态的第三方（此前为空） | 重启后调 `plugin_list {source:'third-party'}` → 含 `dsh-x-opencode-session`（bundle=true、spec 带 commit pin） | **已证（2026-09-14 15:47:57 重启后实测）**：`▸ 非官方（第三方）（1）• dsh-x-opencode-session 0.1.0 [mounted]` + `挂载: web` + `bundle: true` + `来源: github:Coco-king/dsh-x-opencode-session#2e7ce82…`；修前同一调用返回空列表 |
+| A12 | **第三方不得走自研生命周期**：`plugin_mount`/`unmount`/`start`/`stop`/`configure` 对第三方一律拒绝，且文案指名来源与两条指路（改 pin / `dsh plugin`） | `node --test tests/third-party-refusal.test.mjs`（4 条：文案含名/pin/profile/两条命令/§5.23 依据；bundle=false 不编造形态；五个动作动词各异） | 单测已证；**线上待验收**（对 `dsh-x-opencode-session` 调 `plugin_mount` 应返回拒绝文案，且**不写任何文件**） |
 
 ## 8 · 与实现的关系
 
@@ -190,6 +191,10 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
   - 现场：主人装了 `dsh-x-opencode-session`（依赖声明 `github:Coco-king/…#commit` + `dsh.profile.bundles`），实测 `plugin_list --source third-party` **返回空**——`scanThirdParty` 第 354 行 `if (!spec.startsWith('link:')) continue` 把 git pin / tarball / registry 三种形态整条跳过；「非自研插件」的盘点因此不完整。
   - 修法：抽出**纯函数** `classifyDependency(name, spec)` 七档（自研 link / 本地 link / 官方 / 第三方四形态）+ `redactSpec` 脱敏；`scanThirdParty` 按形态解析落点（`link:` → 目标目录；其余 → `<profileDir>/node_modules/<name>`）；档案新增 `bundle`（自述式挂载 ⇒ mounted）与 `spec`（升级/回退指纹）。
   - 教训：**「第三方 = 本地 clone 链接进来」是 2026-08 的世界观**——包管理器形态一变（git pin/bundle），盘点器就静默失灵；**盘点器必须按「安装形态」枚举，而不是按某一种形态的特例写死**。与本次 `dsh-plugin-bootreport` 的同类缺口（只扫 self-plugins）同源，两处一并修（§5.23）。
+- **2026-09-14 §5.23 第二拍：生命周期原语的「适用性」也要显式化（0.1.3）**
+  - 现场：第三方已被盘点到（A11 已证），但 `plugin_mount <第三方>` 仍会走**自研路径**——写 `link:` 依赖（形态错误）+ 插 patch 行（bundle 形态本不需要），或落到「插件不存在 / 未挂载」这类不达意分支。
+  - 修法：纯函数 `thirdPartyRefusal(action, name, spec, profile, bundle)` 生成拒绝文案（指名来源 pin、给出「改 profile 依赖 pin → install → 重启」与「官方 `dsh plugin add/remove`」两条指路、引 §5.23 依据），五个生命周期方法在 `findArchive` 之后**统一拦截**（与既有 `official` 拦截同位置同风格）。
+  - 教训：**「工具能看见某资源」≠「工具的操作语义对它有定义」**——可见性（A11）与适用性（A12）是两件事，前者补完必须立刻问一句「那我的写操作对它意味着什么」。这条与 §5.9 的「能力断言先探测」是同一族：**先定义语义，再允许动手**。
 
 ## 10 · 未决问题
 
@@ -198,4 +203,5 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
 - **U3 README 与实现漂移**：README 工具表 7 项 vs 实际 10 项、来源三类 vs README 两类——是否把 `preflight_check`/`daemon_restart` 补进 README？（补课纪律：本文只报不改，处置归主体）
 - **U4 端到端验收缺口**：A4/A6/A8 需要「真改一个 profile 再回滚」的破坏性实验，代价是可能触发重启——是否值得为它造一个一次性 sandbox profile（如 `at-test`）来跑？（倾向：值得，用 `at-test` profile 隔离）
 - **U5 并行实例写入**：本仓库正被另一实例重构（§8 声明）。补课文档与重构结果谁先合入、行号以哪版为准——需队长在收口时统一复读一次。
-- **U6 第三方档的下一步（§5.23）**：① `plugin_mount` 对第三方**应当显式拒绝**并指路 `dsh plugin --profile <p> add`（当前会走到「已挂载 / 目录不存在」分支，文案不达意）；② 第三方升级/回退要不要做成工具（换 pin + 重装 + 重启 = 现在只能手改 profile `package.json`）；③ `plugin_unmount` 对 bundle 形态的语义（删 `dsh.profile.bundles` 条目？还是只从依赖移除？）——三条都需要主人定调或至少一次实测，本次只做「看得见」。
+- **U6 第三方档的下一步（§5.23）**：① ~~`plugin_mount` 对第三方应当显式拒绝并指路~~ → **2026-09-14 已做**（0.1.3，五个生命周期方法统一拦截，A12）；② 第三方升级/回退要不要做成工具（换 pin + 重装 + 重启 = 现在只能手改 profile `package.json` 或用官方 CLI）；③ `plugin_unmount` 对 bundle 形态的语义（删 `dsh.profile.bundles` 条目？还是只从依赖移除？）——已在拒绝文案里指路官方 CLI，但**本工具是否应当代劳**仍是开放问题，需主人定调或至少一次实测。
+- **U7 拒绝文案的「动作粒度」**：五个动作现在共用同一文案模板（仅动词不同）。`plugin_stop` 对 bundle 形态其实**有可能**通过「从 `dsh.profile.bundles` 摘除」实现——一律拒绝是否过严？（倾向：先一律拒绝，等 U6-③ 有定论再细分）

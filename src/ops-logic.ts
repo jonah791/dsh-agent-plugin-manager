@@ -167,3 +167,38 @@ export function scaffoldSource(name: string, description: string): string {
     '}',
   ].join('\n') + '\n'
 }
+
+/** 生命周期动作（第三方拒绝文案按动作给不同动词）。 */
+export type LifecycleAction = 'mount' | 'unmount' | 'start' | 'stop' | 'configure'
+
+const ACTION_VERB: Record<LifecycleAction, string> = {
+  mount: '挂载', unmount: '卸载', start: '启动', stop: '停用', configure: '配置',
+}
+
+/**
+ * 第三方插件的生命周期拒绝文案（§5.23）。
+ *
+ * 判据：本工具的生命周期原语（写 `link:` 依赖 + 插 patch 行）**只对自研插件成立**；
+ * 第三方是 profile 依赖（registry 版本号 / git pin / tarball / `file:`），挂载由包自带的
+ * `dsh.bundle.patch` 自述完成（列进 profile 的 `dsh.profile.bundles`）。
+ * 用自研路径操作它会写出错误的依赖形态与多余 patch 行——**必须显式拒绝并指路**，而不是让它
+ * 走到「插件不存在 / 未挂载」这类不达意的分支。
+ *
+ * 纯函数（文案可离线断言）。
+ */
+export function thirdPartyRefusal(
+  action: LifecycleAction,
+  name: string,
+  spec: string,
+  profile: string,
+  bundle: boolean,
+): string {
+  return [
+    '拒绝：' + name + ' 是**第三方插件**，不走本工具的生命周期（' + ACTION_VERB[action] + '）。',
+    '  依据：AGENTS §5.23——自研（self-plugins + patch 行）与第三方（profile 依赖 + bundle）是两条不可混用的管理路。',
+    '  来源: ' + spec + (bundle ? '（bundle 形态：包自带 dsh.bundle.patch，挂载由 profile 的 dsh.profile.bundles 自述完成）' : ''),
+    '  升级/回退: 改 ' + profile + ' 的 package.json 里该依赖的 pin → pnpm install → 重启；或用官方 CLI：dsh plugin --profile ' + profile + ' add <url>#<tag>',
+    '  卸载: dsh plugin --profile ' + profile + ' remove ' + name + '（一并处理依赖与 bundles）',
+    '  本工具只管理自研插件（self-plugins/*）；第三方盘点用 plugin_list（source=third-party）与 plugin_boot_status（thirdParty）。',
+  ].join('\n')
+}

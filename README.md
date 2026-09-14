@@ -11,10 +11,10 @@
 # dsh-agent-plugin-manager
 
 <p align="center">
-  <a href="https://github.com/jonah791/dsh-agent-plugin-manager"><img src="https://img.shields.io/badge/version-0.1.2-blue" alt="version"></a>
+  <a href="https://github.com/jonah791/dsh-agent-plugin-manager"><img src="https://img.shields.io/badge/version-0.1.3-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
-  <img src="https://img.shields.io/badge/tests-54%20passed-brightgreen" alt="tests">
+  <img src="https://img.shields.io/badge/tests-58%20passed-brightgreen" alt="tests">
 </p>
 
 **一句话**：DSH 的**插件档案库 + 生命周期操作面**——把「有哪些插件、什么来源、挂到哪个 profile、装了什么工具、配置是什么」变成一条命令可查，把「创建 / 挂载 / 启停 / 卸载 / 改配置」做成**带备份与回滚的闭环**，并附带一道会**拒绝执行**的重启闸门。
@@ -155,7 +155,7 @@ stat -c '%y' self-plugins/dsh-agent-plugin-manager/lib/index.js   # ① 本插�
 npm run build && npm test     # test = node --test "tests/*.test.mjs" "test/*.test.mjs"
 ```
 
-**54 例离线测试，全部 pass**（实跑：`# tests 54 / # pass 54 / # fail 0`）。测试**从 `../lib/*.js` 导入**（与运行时同源），所以脚本本身不含 `tsc`——改源码后必须先 `npm run build`，否则跑的是旧产物（假绿陷阱）。
+**58 例离线测试，全部 pass**（实跑：`# tests 58 / # pass 58 / # fail 0`）。测试**从 `../lib/*.js` 导入**（与运行时同源），所以脚本本身不含 `tsc`——改源码后必须先 `npm run build`，否则跑的是旧产物（假绿陷阱）。
 
 | 文件 | 例数 | 覆盖 |
 |------|------|------|
@@ -163,6 +163,7 @@ npm run build && npm test     # test = node --test "tests/*.test.mjs" "test/*.te
 | `test/preflight-gate.test.mjs` | 14 | **重启闸门**：`decidePreflightGate` 四条判据（未调用 / 预检未过 / 记录不可读 / 时间早于进程启动）+ 调用者提取与比对文案 |
 | `test/registry.test.mjs` | 12 | 档案库：`parsePatchRows`（行解析）、`extractTools`、`isBuilt`、`patchInsert/patchSetDisabled/patchSetConfig/patchRemove` 行编辑、`packageAddLinkDep/packageRemoveDep`、`buildRegistry` 对账 |
 | `tests/registry-deps.test.mjs` | 5 | **第三方盘点（§5.23）**：`classifyDependency` 七档（自研 link / 本地 link / 官方 / git pin / tarball / registry / `file:`）、`redactSpec` 脱敏（pin 保留）、`scanThirdParty` 夹具（git-pin 带 `dsh.profile.bundles` ⇒ `bundle=true` 且 `mounted`；registry 未安装 ⇒ `unmounted`、版本留空）、**尸体测试**（profiles 路径不存在 → 空列表不抛） |
+| `tests/third-party-refusal.test.mjs` | 4 | **第三方生命周期拦截（§5.23）**：拒绝文案含名/pin/profile + 两条指路（改 pin、`dsh plugin add/remove`）+ §5.23 依据；`bundle=false` 时不编造 bundle 说明；五个动作（挂载/卸载/启动/停用/配置）动词各异 |
 | `tests/event-log.test.mjs` | 4 | 事件日志薄壳：行格式、**尸体测试**（不可写路径 → 返回 `false` 且**不抛**） |
 
 **无需网络、无需真实外部依赖**（`pnpm`、`dsh` bin、真实 profile 在测试中都不触碰；临时目录用 `mkdtempSync`）。
@@ -178,6 +179,9 @@ npm run build && npm test     # test = node --test "tests/*.test.mjs" "test/*.te
 - **不变量 I5 卸载保留数据**：`plugin_unmount` 只移除 patch 行与 link 依赖，**不删插件目录**。
 - **第三方按「安装形态」枚举，不按某一种形态写死**（§5.23，2026-09-14 修）：第三方档认五种落点——`link:`（本地 clone）、`git pin`（`github:owner/repo#ref`）、codeload `tarball`、registry 版本号、`file:`；档案额外带 `bundle`（列在 profile 的 `dsh.profile.bundles` ⇒ **自述式挂载**，不由 patch 行挂）与 `spec`（含 pin，升级/回退唯一指纹，落盘前经 `redactSpec` 脱敏）。
   **历史缺陷**：原实现是 `if (!spec.startsWith('link:')) continue`——只认本地 clone 形态，于是 `github:…#commit` 这种依赖**整条被跳过**；主人新装的第三方插件在 `plugin_list --source third-party` 里查无此人（实测返回空）。教训：**盘点器跟着「包管理器形态」演化，而不是跟着某次实现的假设**。
+- **第三方不走本工具的生命周期（§5.23）**：`plugin_mount` / `plugin_unmount` / `plugin_start` / `plugin_stop` / `plugin_configure` 对第三方**一律显式拒绝**，并给出指路（改 profile 依赖 pin 或官方 `dsh plugin --profile <p> add/remove`）。
+  **理由**：本工具的生命周期原语是「写 `link:` 依赖 + 插 patch 行」——只对自研成立；第三方是 profile 依赖 + 包自带 `dsh.bundle.patch`（自述式挂载），用自研路径操作它会写出**错误的依赖形态与多余 patch 行**。
+  **教训**：「工具能看见某资源」≠「工具的操作语义对它有定义」——**可见性补完必须立刻问一句「那我的写操作对它意味着什么」**。
 - **不变量 I6 只读面永不抛**：`plugin_list`/`plugin_inspect` 对坏包、缺失目录逐目录 `try/catch` 跳过并继续；`loadSystemState`/`loadOfficialCatalog` 读不到返回 `{}`/`[]`。
 - **`pnpm install --package-import-method=copy`**：copy 导入方式绕开 Windows 上 link/rename 的 EPERM（`spawn(..., { shell: true })`）。
 - **预检本体零重复实现**：`profile.ts:preflight()` 是 `dsh-agent-preflight` 的 `runPreflightCore` 薄封装，预算 `preflightReadyMs = 90000`（为 48 插件组合实测约 40s 留 2.25x 余量）。
