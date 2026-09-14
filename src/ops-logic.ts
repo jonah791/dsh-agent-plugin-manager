@@ -1,0 +1,164 @@
+/**
+ * ops-logic.ts — 插件管理器的**纯逻辑层**（无 IO、无 Date.now、无 ctx；时间/列表/路径全部注入）。
+ *
+ * 为什么抽出来（2026-09-14 插件可维护性补课 · 技能 `dsh-plugin-testability`）：
+ * plugin-manager 的全部判据都埋在 `apply()`/`createOps()` 的闭包里——校验插件名、
+ * 挑「最新活跃主会话」、判「有没有未验证的新构建」、列表分组排序、档案投影、脚手架模板。
+ * 这些判据的共同点是：**错了不报错**。挑错会话 → 唤醒发给子代理（§5.18 事故形态）；
+ * 构建时效判错 → 组合变更被短路（§5.11 事故形态）；分组排序错了 → 面板顺序乱但「能用」。
+ *
+ * 抽取纪律：判据逐字照搬（含 `> webStartMs + 1000` 的单向容差、`delegationDepth === 0` 过滤、
+ * 分组 `order ?? 99` 排序、档案字段白名单），只把 `process.uptime()/ctx.sessions` 换成显式参数。
+ */
+import type { PluginArchive } from './registry.ts'
+
+/** 构建时效容差（ms）：mtime 必须**晚于** web 启动 1s 以上才算「未验证的新构建」（原判据）。 */
+export const BUILD_SKEW_MS = 1000
+
+/** 插件名校验：小写字母开头，仅 [a-z0-9-]（`plugin_create` 的第一道判据）。 */
+export const PLUGIN_NAME_RE = /^[a-z][a-z0-9-]*$/
+
+/** 插件名是否合法（不合法即拒绝创建，不落盘）。 */
+export function isValidPluginName(name: string): boolean {
+  return PLUGIN_NAME_RE.test(name)
+}
+
+/**
+ * 本次进程是否有「刚构建、尚未被当前实例加载验证」的插件产物。
+ *
+ * 语义（AGENTS.md §5.11 §1）：改代码后重启 = 组合变更，不能拿旧实例健康当免检。
+ * 判据 = 任一 `lib/index.js` 的 mtime **严格晚于** `webStartMs + BUILD_SKEW_MS`。
+ * 无候选（空数组）= 无未验证构建 = `false`；**调用方在扫描失败时另行保守返回 true**（宁严勿漏）。
+ */
+export function anyBuildNewerThan(
+  builds: readonly { name: string; mtimeMs: number }[],
+  webStartMs: number,
+  skewMs: number = BUILD_SKEW_MS,
+): boolean {
+  for (const b of builds) {
+    if (b.mtimeMs > webStartMs + skewMs) return true
+  }
+  return false
+}
+
+/** 会话列表项（duck-typing，不 import 宿主 SessionId branded 类型）。 */
+export type SessionListItem = {
+  id: string
+  header?: { delegationDepth?: number }
+  events?: readonly { time?: number }[]
+}
+
+/**
+ * 目标会话解析（原 `resolveActiveSessionId`）：
+ *   ① 显式配置的 mainSessionId 优先（锁定行为，兼容旧配置）
+ *   ② 否则取 **delegationDepth === 0**（主会话，排除子代理裸 uuid）中最后事件 time 最大者
+ *   ③ 平手保留**先出现的**（严格 `>` 才替换——顺序敏感，别改成 `>=`）
+ * 无候选 → `null`（调用方走兜底/跳过，不抛）。
+ */
+export function pickActiveSessionId(sessions: Iterable<SessionListItem>, mainSessionId: string): string | null {
+  if (mainSessionId) return mainSessionId
+  let best: { id: string; time: number } | null = null
+  for (const s of sessions) {
+    if ((s.header?.delegationDepth ?? 0) !== 0) continue
+    // 2026-09-05 防御：DSH 升级后部分 session 的 events 可能缺失（undefined）——不能直接 .length
+    const events = s.events ?? []
+    const lastTime = events.length > 0 ? (events[events.length - 1]?.time ?? 0) : 0
+    if (best === null || lastTime > best.time) best = { id: s.id, time: lastTime }
+  }
+  return best?.id ?? null
+}
+
+/** loader 条目（cordis loader 的鸭子类型）。 */
+export type LoaderEntryLike = { options?: { name?: string }; disabled?: boolean }
+
+/**
+ * loader 快照（原 `loaderSnapshot`）：
+ * **loader 是挂载状态的权威**（不吃陈旧 system-state 静态快照）；无名条目丢弃，
+ * `disabled === true` 才算停用（其他值/缺失一律视为启用——保守按「在跑」呈现）。
+ */
+export function loaderSnapshotOf(entries: Iterable<LoaderEntryLike>): { name: string; enabled: boolean }[] {
+  const out: { name: string; enabled: boolean }[] = []
+  for (const entry of entries) {
+    const n = entry.options?.name
+    if (typeof n === 'string' && n) out.push({ name: n, enabled: entry.disabled !== true })
+  }
+  return out
+}
+
+/** 档案投影（原 `publicArchive`）：字段白名单 + JSON 深拷贝（剥离函数/undefined，工具面安全）。 */
+export function publicArchive(a: PluginArchive) {
+  return JSON.parse(JSON.stringify({
+    name: a.name, version: a.version, source: a.source,
+    purpose: a.purpose, category: a.category, client: a.client,
+    tools: a.tools, built: a.built,
+    status: a.status, profiles: a.profiles, config: a.config,
+  }))
+}
+
+/** 列表过滤（`plugin_list` 的 source/status 过滤）：空条件 = 不过滤。 */
+export function filterArchives<T extends { source: string; status: string }>(
+  plugins: T[],
+  filter: { source?: string; status?: string },
+): T[] {
+  let out = plugins
+  if (filter.source) out = out.filter((p) => p.source === filter.source)
+  if (filter.status) out = out.filter((p) => p.status === filter.status)
+  return out
+}
+
+/** 分组元数据（标题 + 排序权重；未知来源归 third-party）。 */
+export const GROUP_META: Record<string, { title: string; order: number }> = {
+  self: { title: '▸ 自研', order: 0 },
+  official: { title: '▸ 官方', order: 1 },
+  'third-party': { title: '▸ 非官方（第三方）', order: 2 },
+}
+
+/**
+ * 按来源分组并排序（原 render 的分组段）：
+ * 未知 source 归入 `third-party`；组间按 `order` 升序（未知键 order=99 垫底）；组内保持入参顺序。
+ */
+export function groupOrderedPlugins<T extends { source: string }>(
+  plugins: T[],
+): { key: string; title: string; order: number; items: T[] }[] {
+  const groups = new Map<string, T[]>()
+  for (const p of plugins) {
+    const key = p.source in GROUP_META ? p.source : 'third-party'
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key)!.push(p)
+  }
+  return [...groups.entries()]
+    .sort((a, b) => (GROUP_META[a[0]]?.order ?? 99) - (GROUP_META[b[0]]?.order ?? 99))
+    .map(([key, items]) => ({ key, title: GROUP_META[key]?.title ?? key, order: GROUP_META[key]?.order ?? 99, items }))
+}
+
+/** 档案行（一个插件一行，含「未构建」标记 / 工具 / 挂载）——与原 render 逐字一致。 */
+export function pluginListLines(plugins: Array<{
+  source: string; name: string; version: string; status: string; built: boolean; purpose: string; tools: string[]; profiles: string[]
+}>): string[] {
+  const lines: string[] = []
+  for (const g of groupOrderedPlugins(plugins)) {
+    lines.push(g.title + '（' + g.items.length + '）')
+    for (const p of g.items) {
+      lines.push('  • ' + p.name + ' ' + p.version + ' [' + p.status + ']' + (p.built ? '' : ' 未构建') + (p.purpose ? ' — ' + p.purpose : '') + (p.tools.length ? '\n      工具: ' + p.tools.join(', ') : '') + (p.profiles.length ? '\n      挂载: ' + p.profiles.join(', ') : ''))
+    }
+  }
+  return lines
+}
+
+/** `plugin_create` 的脚手架源码模板（原 `scaffoldSource`，逐字搬移）。 */
+export function scaffoldSource(name: string, description: string): string {
+  const id = 'agent-' + name.replace(/^dsh-/, '')
+  return [
+    '/** ' + name + '：' + (description || '（待填写用途）') + ' */',
+    'import type { Context } from "@deepseek-ai/cordis"',
+    'import z from "@deepseek-ai/schemastery"',
+    'export const name = ' + JSON.stringify(id) + '',
+    'export const inject = [] as const',
+    'export interface Config { enabled: boolean }',
+    'export const Config = z.object({ enabled: z.boolean().default(true) })',
+    'export function apply(ctx: Context, config: Config): void {',
+    '  // TODO: 在此实现插件逻辑',
+    '  ctx.on("ready", () => { ctx.logger(' + JSON.stringify(name) + ').info("ready") })',
+    '}',
+  ].join('\n') + '\n'
+}

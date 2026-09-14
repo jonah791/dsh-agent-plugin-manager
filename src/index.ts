@@ -22,7 +22,22 @@ import type {} from '@deepseek-ai/dsh-session'
 import { buildRegistry, alignWithLoader, readPatch, parsePatchRows, type PluginArchive } from './registry.ts'
 import { patchInsert, patchRemove, patchSetDisabled, patchSetConfig, packageAddLinkDep, packageRemoveDep, installProfile, preflight, rollbackFile } from './profile.ts'
 import { decidePreflightGate, extractCaller, callerComparison, describeCaller, type CallerInfo, type GateDecision, type PreflightRecord } from './preflight-gate.ts'
+// 纯逻辑层（可离线单测，见 tests/ops-logic.test.mjs）+ 事件日志薄壳（tests/event-log.test.mjs）
+import {
+  anyBuildNewerThan,
+  filterArchives,
+  isValidPluginName,
+  loaderSnapshotOf,
+  pickActiveSessionId,
+  pluginListLines,
+  publicArchive,
+  scaffoldSource,
+  type SessionListItem,
+} from './ops-logic.ts'
+import { appendLineSafe, formatEventLine } from './event-log.ts'
 import { writeSentinel } from './sentinel.ts'
+
+export { publicArchive } from './ops-logic.ts'
 
 export const name = 'agent-plugin-manager'
 export const inject = ['tools', 'loader', 'sessions'] as const
@@ -58,6 +73,7 @@ export type { PluginArchive } from './registry.ts'
  * 不能靠「现有实例健康」短路（现有实例跑的是旧代码，健康不代表新组合可加载）。
  * 本插件挂 web profile（进程即 web 实例）→ 用 process.uptime() 反推本进程启动时间。
  * 扫描失败/无 self-plugins → 保守返回 true（走完整试运行，宁严勿漏）。
+ * 判据本体 = anyBuildNewerThan（ops-logic.ts，纯函数：mtime 与启动时刻显式传入）。
  */
 function hasUnverifiedBuilds(dshHome: string): boolean {
   try {
@@ -71,6 +87,7 @@ function hasUnverifiedBuilds(dshHome: string): boolean {
       join(dshHome, 'self-plugins'),
     ]
     const seen = new Set<string>()
+    const builds: Array<{ name: string; mtimeMs: number }> = []
     for (const dir of candidates) {
       const real = dir // 不 resolve 符号链接，避免重复
       if (seen.has(real) || !existsSync(dir)) continue
@@ -81,26 +98,17 @@ function hasUnverifiedBuilds(dshHome: string): boolean {
         if (name.startsWith('.')) continue
         const lib = join(dir, name, 'lib', 'index.js')
         try {
-          if (existsSync(lib) && statSync(lib).mtimeMs > webStartMs + 1000) {
-            return true
-          }
+          if (existsSync(lib)) builds.push({ name, mtimeMs: statSync(lib).mtimeMs })
         } catch { /* 单插件不可读跳过 */ }
       }
     }
-    return false
+    return anyBuildNewerThan(builds, webStartMs)
   } catch {
     return true // 异常保守：走完整试运行
   }
 }
 
-export function publicArchive(a: PluginArchive) {
-  return JSON.parse(JSON.stringify({
-    name: a.name, version: a.version, source: a.source,
-    purpose: a.purpose, category: a.category, client: a.client,
-    tools: a.tools, built: a.built,
-    status: a.status, profiles: a.profiles, config: a.config,
-  }))
-}
+/** 档案投影实现见 ops-logic.ts（纯函数，可离线单测）；此处经 `export { publicArchive }` 保持公共 API 不变。 */
 
 export interface PluginManagerOps {
   list(): PluginArchive[]
@@ -111,36 +119,14 @@ export interface PluginManagerOps {
   configure(name: string, profile: string, cfg: Record<string, unknown>): Promise<{ ok: boolean; error?: string; note?: string }>
   create(name: string, description: string): { ok: boolean; error?: string; dir?: string }
 }
-function scaffoldSource(name: string, description: string): string {
-  const id = 'agent-' + name.replace(/^dsh-/, '')
-  return [
-    '/** ' + name + '：' + (description || '（待填写用途）') + ' */',
-    'import type { Context } from "@deepseek-ai/cordis"',
-    'import z from "@deepseek-ai/schemastery"',
-    'export const name = ' + JSON.stringify(id) + '',
-    'export const inject = [] as const',
-    'export interface Config { enabled: boolean }',
-    'export const Config = z.object({ enabled: z.boolean().default(true) })',
-    'export function apply(ctx: Context, config: Config): void {',
-    '  // TODO: 在此实现插件逻辑',
-    '  ctx.on("ready", () => { ctx.logger(' + JSON.stringify(name) + ').info("ready") })',
-    '}',
-  ].join('\n') + '\n'
-}
+// 脚手架模板实现见 ops-logic.ts（scaffoldSource，纯字符串生成，可离线单测）。
 
 // 目标会话解析：不绑定固定会话——追踪最新活跃主会话（delegationDepth===0 且最后事件 time 最大）；
 // 显式配置 mainSessionId 时仍尊重锁定（兼容旧行为，写入哨兵供 watch 唤醒）。
+// 判据本体 = pickActiveSessionId（ops-logic.ts，纯函数：会话列表由调用方注入）。
 function resolveActiveSessionId(ctx: Context, mainSessionId: string): string | null {
-  if (mainSessionId) return mainSessionId
-  let best: { id: string; time: number } | null = null
-  for (const s of (ctx as Context & { sessions?: { list(): { id: string; header?: { delegationDepth?: number }; events: { time: number }[] }[] } }).sessions?.list() ?? []) {
-    if ((s.header?.delegationDepth ?? 0) !== 0) continue
-    // 2026-09-05 防御：DSH 升级后部分 session 的 events 可能缺失（undefined）——不能直接 .length
-    const events = s.events ?? []
-    const lastTime = events.length > 0 ? (events[events.length - 1]?.time ?? 0) : 0
-    if (best === null || lastTime > best.time) best = { id: s.id, time: lastTime }
-  }
-  return best?.id ?? null
+  const list = (ctx as Context & { sessions?: { list(): SessionListItem[] } }).sessions?.list() ?? []
+  return pickActiveSessionId(list, mainSessionId)
 }
 
 export function createOps(ctx: Context, config: Config, loader: { entries(): Iterable<{ options: { name?: string }; disabled?: boolean }> }): PluginManagerOps {
@@ -155,10 +141,7 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
   const sessionId = config.mainSessionId
 
   const eventLog = (msg: string) => {
-    try {
-      const fs = require('node:fs')
-      fs.appendFileSync(join(dshHome || process.cwd(), '.plugin-manager-events.log'), '[' + new Date().toISOString() + '] ' + msg + '\n')
-    } catch { /* 忽略 */ }
+    appendLineSafe(join(dshHome || process.cwd(), '.plugin-manager-events.log'), formatEventLine(new Date(), msg))
   }
 
   const findRow = (profileDir: string, nm: string) =>
@@ -213,14 +196,8 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
   }
 
   const loaderSnapshot = (): Array<{ name: string; enabled: boolean }> => {
-    try {
-      const out: Array<{ name: string; enabled: boolean }> = []
-      for (const entry of loader.entries()) {
-        const n = entry.options?.name
-        if (typeof n === 'string' && n) out.push({ name: n, enabled: entry.disabled !== true })
-      }
-      return out
-    } catch { return [] }
+    // 映射逻辑 = loaderSnapshotOf（ops-logic.ts，纯函数）；loader 访问本身仍在此处兜错
+    try { return loaderSnapshotOf(loader.entries()) } catch { return [] }
   }
 
   return {
@@ -308,7 +285,7 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
     },
 
     create(nm, description) {
-      if (!/^[a-z][a-z0-9-]*$/.test(nm)) return { ok: false, error: '插件名须为小写字母开头，仅 [a-z0-9-]' }
+      if (!isValidPluginName(nm)) return { ok: false, error: '插件名须为小写字母开头，仅 [a-z0-9-]' }
       const dir = join(selfPluginsDir, nm)
       if (existsSync(dir)) return { ok: false, error: '目录已存在: ' + dir }
       try {
@@ -438,30 +415,11 @@ export function apply(ctx: Context, config: Config): void {
       status: { type: 'string', enum: ['mounted', 'disabled', 'unmounted'], description: '状态过滤' }
     },
     output: { schema: { type: 'object', additionalProperties: false, properties: { count: { type: 'number', required: true }, plugins: { type: 'array', required: true, items: { type: 'object', additionalProperties: true } } } }, render: (_a: any, v: any) => {
-      const groupMeta: Record<string, { title: string; order: number }> = {
-        self: { title: '▸ 自研', order: 0 },
-        official: { title: '▸ 官方', order: 1 },
-        'third-party': { title: '▸ 非官方（第三方）', order: 2 },
-      }
-      const groups = new Map<string, any[]>()
-      for (const p of v.plugins) {
-        const key = p.source in groupMeta ? p.source : 'third-party'
-        if (!groups.has(key)) groups.set(key, [])
-        groups.get(key)!.push(p)
-      }
-      const lines: string[] = []
-      for (const [key, list] of [...groups.entries()].sort((a, b) => (groupMeta[a[0]]?.order ?? 99) - (groupMeta[b[0]]?.order ?? 99))) {
-        lines.push((groupMeta[key]?.title ?? key) + '（' + list.length + '）')
-        for (const p of list) {
-          lines.push('  • ' + p.name + ' ' + p.version + ' [' + p.status + ']' + (p.built ? '' : ' 未构建') + (p.purpose ? ' — ' + p.purpose : '') + (p.tools.length ? '\n      工具: ' + p.tools.join(', ') : '') + (p.profiles.length ? '\n      挂载: ' + p.profiles.join(', ') : ''))
-        }
-      }
-      return [{ type: 'text', text: lines.join('\n') }]
+      // 分组/排序/行格式 = pluginListLines（ops-logic.ts，纯函数，可离线单测）
+      return [{ type: 'text', text: pluginListLines(v.plugins).join('\n') }]
     } },
     async execute(args: { source?: string; status?: string }) {
-      let plugins = ops.list()
-      if (args.source) plugins = plugins.filter((p) => p.source === args.source)
-      if (args.status) plugins = plugins.filter((p) => p.status === args.status)
+      const plugins = filterArchives(ops.list(), { source: args.source, status: args.status })
       return { count: plugins.length, plugins: plugins.map(publicArchive) }
     },
   }))
