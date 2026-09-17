@@ -115,10 +115,10 @@ function hasUnverifiedBuilds(dshHome: string): boolean {
 export interface PluginManagerOps {
   list(): PluginArchive[]
   inspect(name: string): PluginArchive | null
-  mount(name: string, profile: string, cfg?: Record<string, unknown>): Promise<{ ok: boolean; error?: string; note?: string }>
-  setEnabled(name: string, profile: string, enabled: boolean): Promise<{ ok: boolean; error?: string; note?: string; bak?: string }>
-  remove(name: string, profile: string): Promise<{ ok: boolean; error?: string; note?: string }>
-  configure(name: string, profile: string, cfg: Record<string, unknown>): Promise<{ ok: boolean; error?: string; note?: string }>
+  mount(name: string, profile: string, cfg?: Record<string, unknown>, caller?: CallerInfo | null): Promise<{ ok: boolean; error?: string; note?: string }>
+  setEnabled(name: string, profile: string, enabled: boolean, caller?: CallerInfo | null): Promise<{ ok: boolean; error?: string; note?: string; bak?: string }>
+  remove(name: string, profile: string, caller?: CallerInfo | null): Promise<{ ok: boolean; error?: string; note?: string }>
+  configure(name: string, profile: string, cfg: Record<string, unknown>, caller?: CallerInfo | null): Promise<{ ok: boolean; error?: string; note?: string }>
   create(name: string, description: string): { ok: boolean; error?: string; dir?: string }
 }
 // 脚手架模板实现见 ops-logic.ts（scaffoldSource，纯字符串生成，可离线单测）。
@@ -157,9 +157,35 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
     return alignWithLoader([arch], loaderSnapshot())[0] ?? null
   }
 
-  const triggerReload = (note: string) => {
-    const file = writeSentinel(dshHome, { workspace, sessionId: resolveActiveSessionId(ctx, config.mainSessionId) ?? undefined, note })
-    eventLog('哨兵已写: ' + file + ' | ' + note)
+  /**
+   * 写哨兵并绑定**触发者会话**（主人 2026-09-14 定调：「那个会话触发的，提醒就发到那个会话」）。
+   *
+   * 旧实现写 `resolveActiveSessionId`（猜出来的「活跃会话」）——猜错就把重启提醒投到别的会话：
+   * 实测 2026-09-14 18:17 的重启，主人所在会话只跑了长 turn（工具事件不推进 updatedAt）就被
+   * 哨兵判「锚点腐化」，提醒落到另一个会话，主人永远收不到。
+   *
+   * 规则：调用者会话（`exec.agent`）是用户会话（`session-*`）→ 用它；
+   * 不可得或是派生会话（裸 uuid 不可 prompt）→ 回退旧判据，并把来源写进哨兵 note（可诊断）。
+   */
+  const triggerReload = (note: string, caller?: CallerInfo | null) => {
+    const callerSid = caller?.sessionId ?? null
+    const useCaller = typeof callerSid === 'string' && callerSid.startsWith('session-')
+    let sid: string | undefined
+    let src: string
+    if (useCaller) {
+      sid = callerSid
+      src = 'caller'
+    } else {
+      try {
+        sid = resolveActiveSessionId(ctx, config.mainSessionId) ?? undefined
+        src = 'fallback-active(无调用者或非用户会话)'
+      } catch {
+        sid = undefined
+        src = 'unavailable'
+      }
+    }
+    const file = writeSentinel(dshHome, { workspace, sessionId: sid, note: note + ' | trigger=' + src })
+    eventLog('哨兵已写: ' + file + ' | ' + note + ' | trigger=' + src + ' sid=' + String(sid ?? '（无）'))
   }
 
   /**
@@ -175,7 +201,7 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
     }
   }
 
-  const mount = async (nm: string, profile: string, cfg?: Record<string, unknown>) => {
+  const mount = async (nm: string, profile: string, cfg?: Record<string, unknown>, caller?: CallerInfo | null) => {
     const arch = findArchive(nm)
     if (!arch) return { ok: false, error: '插件不存在: ' + nm }
     if (arch.source === 'official') return { ok: false, error: '官方 bundle 无需挂载（bundles 列表自带）' }
@@ -207,7 +233,7 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
         return { ok: false, error: '预检失败，已回滚：' + pr.detail.slice(0, 800) }
       }
     }
-    triggerReload('plugin_mount ' + nm + '@' + profile)
+    triggerReload('plugin_mount ' + nm + '@' + profile, caller)
     eventLog('挂载 ' + nm + '@' + profile + ' 完成')
     return { ok: true, note: '已挂载 ' + nm + '@' + profile + '；哨兵已写，web 将重启生效' }
   }
@@ -222,7 +248,7 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
     inspect(nm) { return findArchive(nm) },
     mount,
 
-    async setEnabled(nm, profile, enabled) {
+    async setEnabled(nm: string, profile: string, enabled: boolean, caller?: CallerInfo | null) {
       const arch = findArchive(nm)
       if (!arch) return { ok: false, error: '插件不存在: ' + nm }
       const tp = refuseThirdParty(arch, enabled ? 'start' : 'stop', nm, profile)
@@ -243,12 +269,12 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
           return { ok: false, error: '预检失败，已回滚：' + pr.detail.slice(0, 800) }
         }
       }
-      triggerReload('plugin_' + (enabled ? 'start' : 'stop') + ' ' + nm + '@' + profile)
+      triggerReload('plugin_' + (enabled ? 'start' : 'stop') + ' ' + nm + '@' + profile, caller)
       eventLog((enabled ? '启动' : '停用') + ' ' + nm + '@' + profile + ' 完成')
       return { ok: true, note: (enabled ? '已启用' : '已停用') + ' ' + nm + '@' + profile + '；哨兵已写，web 将重启生效' }
     },
 
-    async remove(nm, profile) {
+    async remove(nm: string, profile: string, caller?: CallerInfo | null) {
       const arch = findArchive(nm)
       if (!arch) return { ok: false, error: '插件不存在: ' + nm }
       const tp = refuseThirdParty(arch, 'unmount', nm, profile)
@@ -279,12 +305,12 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
           return { ok: false, error: '预检失败，已回滚：' + pr.detail.slice(0, 800) }
         }
       }
-      triggerReload('plugin_remove ' + nm + '@' + profile)
+      triggerReload('plugin_remove ' + nm + '@' + profile, caller)
       eventLog('卸载 ' + nm + '@' + profile + ' 完成（数据目录保留）')
       return { ok: true, note: '已卸载 ' + nm + '@' + profile + '；数据目录保留；哨兵已写，web 将重启生效' }
     },
 
-    async configure(nm, profile, cfg) {
+    async configure(nm: string, profile: string, cfg: Record<string, unknown>, caller?: CallerInfo | null) {
       const arch = findArchive(nm)
       if (!arch) return { ok: false, error: '插件不存在: ' + nm }
       const tp = refuseThirdParty(arch, 'configure', nm, profile)
@@ -302,7 +328,7 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
           return { ok: false, error: '预检失败，已回滚：' + pr.detail.slice(0, 800) }
         }
       }
-      triggerReload('plugin_configure ' + nm + '@' + profile)
+      triggerReload('plugin_configure ' + nm + '@' + profile, caller)
       eventLog('配置更新 ' + nm + '@' + profile + '：' + JSON.stringify(cfg).slice(0, 200))
       return { ok: true, note: '配置已更新；哨兵已写，web 将重启生效' }
     },
@@ -480,8 +506,8 @@ export function apply(ctx: Context, config: Config): void {
       config: { type: 'object', additionalProperties: true, description: '初始配置（patch config，可选）' }
     },
     output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, note: { type: 'string' }, error: { type: 'string' } } }, render: (_a: any, v: any) => [{ type: 'text', text: v.ok ? (v.note ?? 'ok') : (v.error ?? '') }] },
-    async execute(args: { name: string; profile?: string; config?: Record<string, unknown> }) {
-      return ops.mount(args.name, args.profile || 'web', args.config)
+    async execute(args: { name: string; profile?: string; config?: Record<string, unknown> }, exec) {
+      return ops.mount(args.name, args.profile || 'web', args.config, extractCaller(exec))
     },
   }))
 
@@ -493,8 +519,8 @@ export function apply(ctx: Context, config: Config): void {
       profile: { type: 'string', description: '目标 profile（默认 web）' }
     },
     output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, note: { type: 'string' }, error: { type: 'string' } } }, render: (_a: any, v: any) => [{ type: 'text', text: v.ok ? (v.note ?? 'ok') : (v.error ?? '') }] },
-    async execute(args: { name: string; profile?: string }) {
-      return ops.remove(args.name, args.profile || 'web')
+    async execute(args: { name: string; profile?: string }, exec) {
+      return ops.remove(args.name, args.profile || 'web', extractCaller(exec))
     },
   }))
 
@@ -507,8 +533,8 @@ export function apply(ctx: Context, config: Config): void {
         profile: { type: 'string', description: '目标 profile（默认 web）' }
       },
       output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, note: { type: 'string' }, error: { type: 'string' } } }, render: (_a: any, v: any) => [{ type: 'text', text: v.ok ? (v.note ?? 'ok') : (v.error ?? '') }] },
-      async execute(args: { name: string; profile?: string }) {
-        return ops.setEnabled(args.name, args.profile || 'web', enabled)
+      async execute(args: { name: string; profile?: string }, exec) {
+        return ops.setEnabled(args.name, args.profile || 'web', enabled, extractCaller(exec))
       },
     }))
   }
@@ -522,8 +548,8 @@ export function apply(ctx: Context, config: Config): void {
       config: { type: 'object', additionalProperties: true, required: true, description: '新配置（整体替换）' }
     },
     output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, note: { type: 'string' }, error: { type: 'string' } } }, render: (_a: any, v: any) => [{ type: 'text', text: v.ok ? (v.note ?? 'ok') : (v.error ?? '') }] },
-    async execute(args: { name: string; profile?: string; config: Record<string, unknown> }) {
-      return ops.configure(args.name, args.profile || 'web', args.config)
+    async execute(args: { name: string; profile?: string; config: Record<string, unknown> }, exec) {
+      return ops.configure(args.name, args.profile || 'web', args.config, extractCaller(exec))
     },
   }))
 
@@ -584,13 +610,29 @@ export function apply(ctx: Context, config: Config): void {
         return { ok: false, error: '重启被拒绝：' + gate.reason + '。请先调用 preflight_check 预检工具（通过后）再重启。' }
       }
       const dshHome = config.dshHome || process.env.DSH_HOME || ''
-      // 2026-09-05 容错：会话解析失败（events 缺失/代理抛错）不得阻断写哨兵
+      // 【触发者绑定 · 主人 2026-09-14】唤醒目标 = **发起本次重启的那个会话**（exec.agent），
+      // 不再用 resolveActiveSessionId 猜「活跃会话」——猜错就把提醒投到别的会话（实测 2026-09-14：
+      // A 会话触发、提醒落到 B 会话，A 永远收不到）。2026-09-05 容错保留：解析失败不得阻断写哨兵。
+      const callerSid = caller.sessionId
+      const useCaller = typeof callerSid === 'string' && callerSid.startsWith('session-')
       let sid: string | undefined
-      try { sid = resolveActiveSessionId(ctx, config.mainSessionId) ?? undefined } catch { sid = undefined }
+      let sidSource: string
+      if (useCaller) {
+        sid = callerSid
+        sidSource = 'caller'
+      } else {
+        try {
+          sid = resolveActiveSessionId(ctx, config.mainSessionId) ?? undefined
+          sidSource = 'fallback-active(无调用者或非用户会话)'
+        } catch {
+          sid = undefined
+          sidSource = 'unavailable'
+        }
+      }
       const file = writeSentinel(dshHome, {
         workspace: config.defaultWorkspace || process.cwd(),
         sessionId: sid,
-        note: 'daemon_restart: ' + args.reason.trim() + (args.profile ? ' @' + args.profile : ''),
+        note: 'daemon_restart: ' + args.reason.trim() + (args.profile ? ' @' + args.profile : '') + ' | trigger=' + sidSource,
       })
       try {
         const fs = await import('node:fs')

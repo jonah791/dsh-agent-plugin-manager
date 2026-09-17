@@ -193,6 +193,21 @@ export function extractTools(dir: string): string[] {
         tools.push(m[1])
       }
     }
+    // 形态 4：**数据驱动注册**（2026-09-17 修）——`const reg = (tool) => ctx.tools.register(defineTool({...tool}))`
+    // 且工具元数据来自数组/工厂（name 落在 defineTool 的 500 字窗口之外）。
+    // 实证：dsh-blue-team / dsh-sec-tools 档案 tools=[]（实际各 8 个）、dsh-search-pro 少报 20+。
+    // 判据：文件里出现任何注册调用 ⇒ 收集**符合工具名形状**（小写前缀 + 下划线）的 name 字面量。
+    if (/\.tools\s*\.\s*register\s*\(/.test(text)) {
+      const re4 = /name:\s*['"]([a-z][a-z0-9]*(?:_[a-z0-9]+)+)['"]/g
+      while ((m = re4.exec(text))) {
+        if (!m[1] || tools.includes(m[1])) continue
+        if (isCommentLine(text, m.index)) continue
+        const lineStart = text.lastIndexOf('\n', m.index) + 1
+        const line = text.slice(lineStart, m.index)
+        if (/export\s+const\s+name\b|const\s+name\s*=/.test(line)) continue
+        tools.push(m[1])
+      }
+    }
   }
   return tools.sort()
 }
