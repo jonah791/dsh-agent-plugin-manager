@@ -33,6 +33,16 @@ export function declaredToolCount(purpose: string): number | null {
   return Number.isFinite(n) ? n : null
 }
 
+/**
+ * 是否**明确声明「本插件不注册工具」**（service-only 形态的合规写法）。
+ * 为什么需要它：watch 系的 guardian/sentinel/preflight/runtime 与 panel 宿主只提供 service/UI，
+ * 零工具是**常态不是缺陷**——检查器应当认得这种声明，而不是逼每个 service 插件假装有工具
+ * （否则要么留下恒久假警报，要么逼人写出不诚实的描述）。
+ */
+export function declaresNoTools(purpose: string): boolean {
+  return /不注册工具|无工具|不提供工具|不含工具|service[- ]?only|只提供\s*service|仅提供\s*service/i.test(purpose ?? '')
+}
+
 export interface DriftOptions {
   /** 参与检查的来源（默认 ['self']）。**官方/第三方 bundle 不适用我的约定**——
    *  它们可以只提供 service/UI 而没有 purpose/工具；对它们套自研判据会产生大量假警报
@@ -64,7 +74,7 @@ export function detectDrift(archives: PluginArchive[], opts: DriftOptions = {}):
     if (a.built === false && (a.status === 'mounted' || (a.profiles?.length ?? 0) > 0)) {
       out.push({ name: a.name, kind: 'unbuilt-mount', detail: `声明挂载/有 profile 但未构建（status=${a.status}）` })
     }
-    if (declared === null && actual === 0 && a.status === 'mounted') {
+    if (declared === null && actual === 0 && a.status === 'mounted' && !declaresNoTools(a.purpose ?? '')) {
       out.push({ name: a.name, kind: 'tools-zero-unclaimed', detail: '挂载中但未声称任何工具且清单为空（可能只提供 service/client UI——若不是，则是采集漏）' })
     }
   }

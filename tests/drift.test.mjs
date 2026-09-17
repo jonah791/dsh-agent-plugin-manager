@@ -76,3 +76,13 @@ test('自研零工具但未声称 ⇒ 仍要报（自研应当要么有工具、
   const f = detectDrift([arch({ name: 'dsh-service-only', source: 'self', purpose: '守护运行时服务', tools: [] })])
   assert.ok(f.some((x) => x.kind === 'tools-zero-unclaimed'))
 })
+
+test('service-only 合规声明 ⇒ 不再报 tools-zero-unclaimed（合规形态要认）', () => {
+  const f = detectDrift([arch({ name: 'dsh-agent-guardian', purpose: '守卫插件：web 保活（只提供 service，不注册工具）', tools: [] })])
+  assert.deepEqual(f.filter((x) => x.kind === 'tools-zero-unclaimed'), [])
+})
+
+test('未声明的零工具 ⇒ 仍要报（不能靠沉默过关）', () => {
+  const f = detectDrift([arch({ name: 'dsh-x', purpose: '某插件：做点事', tools: [] })])
+  assert.ok(f.some((x) => x.kind === 'tools-zero-unclaimed'))
+})
