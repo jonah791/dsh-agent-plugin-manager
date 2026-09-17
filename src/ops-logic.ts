@@ -85,13 +85,18 @@ export function loaderSnapshotOf(entries: Iterable<LoaderEntryLike>): { name: st
   return out
 }
 
-/** 档案投影（原 `publicArchive`）：字段白名单 + JSON 深拷贝（剥离函数/undefined，工具面安全）。 */
+import { redactConfig } from './redact-config.ts'
+
+/** 档案投影（原 `publicArchive`）：字段白名单 + JSON 深拷贝（剥离函数/undefined，工具面安全）。
+ *  ⚠ **config 必须脱敏**（2026-09-17 事故）：原先原样投影 ⇒ 守护插件的 telegram bot token 与 chat id
+ *  被渲染进工具输出 ⇒ 进上下文 ⇒ 进会话日志。工具面不得把凭据拉进会话。 */
 export function publicArchive(a: PluginArchive) {
   return JSON.parse(JSON.stringify({
     name: a.name, version: a.version, source: a.source,
     purpose: a.purpose, category: a.category, client: a.client,
     tools: a.tools, built: a.built,
-    status: a.status, profiles: a.profiles, config: a.config,
+    status: a.status, profiles: a.profiles,
+    config: redactConfig(a.config),
     // 第三方档专有（§5.23）：bundle = 自述式挂载；spec = 依赖声明（含 pin，落盘前已脱敏）
     // 注：不投影 `path`（本地绝对路径不属工具面白名单）
     ...(a.bundle === undefined ? {} : { bundle: a.bundle }),
