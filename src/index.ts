@@ -20,6 +20,7 @@ import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-session'
 import { buildRegistry, alignWithLoader, readPatch, parsePatchRows, type PluginArchive } from './registry.ts'
+import { detectDrift } from './drift.ts'
 import { patchInsert, patchRemove, patchSetDisabled, patchSetConfig, packageAddLinkDep, packageRemoveDep, installProfile, preflight, rollbackFile } from './profile.ts'
 import { decidePreflightGate, extractCaller, callerComparison, describeCaller, type CallerInfo, type GateDecision, type PreflightRecord } from './preflight-gate.ts'
 // 纯逻辑层（可离线单测，见 tests/ops-logic.test.mjs）+ 事件日志薄壳（tests/event-log.test.mjs）
@@ -481,6 +482,29 @@ export function apply(ctx: Context, config: Config): void {
     async execute(args: { name: string }) {
       const p = ops.inspect(args.name)
       return p ? { ok: true, plugin: publicArchive(p) } : { ok: false, error: '插件不存在: ' + args.name }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'plugin_audit',
+    description: '插件档案漂移审计（只读）：比对「自述」与「档案事实」——自述工具数 ≠ 清单长度 / 声称有工具但清单为空 / 无用途描述 / 声明挂载但未构建 / 挂载零工具未声称。抓的是「描述改了、工具面没同步」这类漂移（2026-09-17 事故：dsh-blue-team 档案 tools=[] 而自称 8 个、dsh-search-pro 列 1 而自称 23）。边界：**看不见运行时真实工具面**——那要靠 toolface status 与实调验证。',
+    parameters: { only: { type: 'string', description: '只看某个插件（可选）' } },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          count: { type: 'number' },
+          findings: { type: 'array', items: { type: 'string' } },
+        },
+      },
+      render: (_a: any, v: any) => [{ type: 'text', text: v.count === 0 ? '✓ 无漂移：自述与档案事实一致' : v.findings.join('\n') }],
+    },
+    async execute(args: { only?: string }) {
+      const all = ops.list() as PluginArchive[]
+      const archives = args.only ? all.filter((a) => a.name === args.only) : all
+      const findings = detectDrift(archives).map((f) => `⚠ ${f.name} · ${f.kind} — ${f.detail}`)
+      return { ok: true, count: findings.length, findings }
     },
   }))
 
