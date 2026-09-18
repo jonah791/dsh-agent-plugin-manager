@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "dsh-agent-plugin-manager",
     "version":  "0.1.5",
     "description":  "插件管理器：插件档案库（清单/用途/工具/配置认知，含 9 工具）+ 生命周期管理（创建/挂载/启停/卸载/配置）+ **档案漂移审计**（plugin_audit：自述 vs 档案事实），host 工具面 + 官方设置页「插件管理」tab。",
