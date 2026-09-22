@@ -68,6 +68,71 @@ export function pickActiveSessionId(sessions: Iterable<SessionListItem>, mainSes
   return best?.id ?? null
 }
 
+/** 默认「在飞」窗口：10 分钟。取值理由见 `findInFlightSubagents` 的边界说明。 */
+export const DEFAULT_INFLIGHT_WINDOW_MS = 10 * 60_000
+
+/** 一个在飞分身的最小描述（只带判断与可读理由所需字段）。 */
+export type InFlightSubagent = {
+  id: string
+  delegationDepth: number
+  lastEventMs: number
+  /** 距最后一次活动过去了多久（ms）。 */
+  ageMs: number
+}
+
+/**
+ * 「在飞分身」检测（2026-09-22 · 主人：「重启的时候会打断分身，想办法解决一下」）。
+ *
+ * 背景（实测）：`subagent` 工具派出的子代理与 web **同进程**。`daemon_restart` 一 kill 就把它斩断，
+ * 而它**不可寻址**（`send_message` → 不是 teammate）、**不是 job**（`job_list` 为空）、
+ * **无 settle 通知** ⇒ 重启即失联、整轮工作蒸发（当日实测：分身最后产出 14:57:27，我 14:57:32 重启）。
+ *
+ * 判据：`delegationDepth > 0`（派生会话）**且**最后事件时间在 `windowMs` 内。
+ *
+ * ⚠ 为什么不用「会话存在」当判据：子代理跑完仍会留在会话列表里，用「存在」判 ⇒ **永远拒绝重启**，
+ * 等于把一个可恢复的小麻烦（打断一次）换成一个不可自愈的大麻烦（再也重启不了）。**宁可漏报，不可误锁。**
+ *
+ * 边界（诚实）：
+ *  · 这是**启发式**——长 turn 期间工具事件会推进时间，但「思考很久不调工具」的分身可能被误判为已结束；
+ *    窗口给到 10 分钟以降低误判率。
+ *  · 取不到 events / 取不到 time 的会话按 **不在飞** 处理（同样服从「宁可漏报」）。
+ *  · 时间戳在未来（负 age，时钟偏移）⇒ 按**在飞**处理（安全方向：不确定时倾向于保护）。
+ *  · 与 `pickActiveSessionId` 同约定：取 events **最后一项**的 time（不是最大值）——两处口径必须一致。
+ */
+export function findInFlightSubagents(
+  sessions: Iterable<SessionListItem>,
+  nowMs: number,
+  windowMs: number = DEFAULT_INFLIGHT_WINDOW_MS,
+): InFlightSubagent[] {
+  const out: InFlightSubagent[] = []
+  for (const s of sessions) {
+    // 输入不可信（会话对象来自宿主，字段形状会随版本漂移）：
+    // 深度必须是**有限数字**——`'1' <= 0` 在 JS 里会被强转成 `1 <= 0`（false），
+    // 字符串深度能混进来；`NaN <= 0` 同样是 false。两者都必须显式挡掉。
+    const depth = s.header?.delegationDepth
+    if (typeof depth !== 'number' || !Number.isFinite(depth) || depth <= 0) continue
+    // 比 pickActiveSessionId 更严：这里显式要求 events 是数组、time 是有限正数
+    // （那边沿用旧口径不改，避免动到已测行为的语义）。
+    const events = s.events
+    if (!Array.isArray(events) || events.length === 0) continue
+    const rawTime = (events[events.length - 1] as { time?: unknown } | null | undefined)?.time
+    if (typeof rawTime !== 'number' || !Number.isFinite(rawTime) || rawTime <= 0) continue
+    const age = nowMs - rawTime
+    if (age > windowMs) continue
+    out.push({ id: s.id, delegationDepth: depth, lastEventMs: rawTime, ageMs: age })
+  }
+  return out
+}
+
+/** 把在飞清单压成一行可读理由（进拒绝消息与事件日志）。空清单 → 空串。 */
+export function describeInFlight(list: readonly InFlightSubagent[]): string {
+  if (list.length === 0) return ''
+  const parts = list.map(
+    (x) => x.id + '（深度 ' + String(x.delegationDepth) + ' · 最后活动 ' + String(Math.max(0, Math.round(x.ageMs / 1000))) + 's 前）',
+  )
+  return String(list.length) + ' 个分身正在跑：' + parts.join(' · ')
+}
+
 /** loader 条目（cordis loader 的鸭子类型）。 */
 export type LoaderEntryLike = { options?: { name?: string }; disabled?: boolean }
 

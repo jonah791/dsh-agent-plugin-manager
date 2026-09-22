@@ -26,7 +26,10 @@ import { decidePreflightGate, extractCaller, callerComparison, describeCaller, t
 // 纯逻辑层（可离线单测，见 tests/ops-logic.test.mjs）+ 事件日志薄壳（tests/event-log.test.mjs）
 import {
   anyBuildNewerThan,
+  DEFAULT_INFLIGHT_WINDOW_MS,
+  describeInFlight,
   filterArchives,
+  findInFlightSubagents,
   isValidPluginName,
   loaderSnapshotOf,
   pickActiveSessionId,
@@ -55,6 +58,12 @@ export interface Config {
   defaultWorkspace: string
   registryFile: string
   installTimeoutMs: number
+  /**
+   * 「在飞分身」判定窗口（ms，2026-09-22 新增）：派生会话最后一次活动在这个窗口内
+   * ⇒ 视为正在跑，`daemon_restart` 将被拒绝（除非传 `force: true`）。
+   * 设 `0` = 关闭该门控（**不建议**：关掉后重启会静默斩断分身，且日志会写明是「按配置关闭」）。
+   */
+  inflightWindowMs: number
 }
 export const Config = z.object({
   dshHome: z.string().default(process.env.DSH_HOME || ''),
@@ -65,6 +74,7 @@ export const Config = z.object({
   defaultWorkspace: z.string().default(''),
   registryFile: z.string().default(''),
   installTimeoutMs: z.number().default(600000),
+  inflightWindowMs: z.number().default(DEFAULT_INFLIGHT_WINDOW_MS),
 })
 
 export type { PluginArchive } from './registry.ts'
@@ -611,13 +621,14 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'daemon_restart',
-    description: '重启 web 守护服务（哨兵协议：预检 → kill+重启 → 唤醒 → 清哨兵）。爱丽丝自主决策用：内存回收/状态清理/任意原因；reason 必填留痕。不改组合，组合预检由守护 v2.3 门控兜底（失败不 kill 旧 web）。重启前检查**本 web 进程内**是否调用过预检工具（preflight_check）——未调用则拒绝（进程级判据，§5.11 §3）。',
+    description: '重启 web 守护服务（哨兵协议：预检 → kill+重启 → 唤醒 → 清哨兵）。爱丽丝自主决策用：内存回收/状态清理/任意原因；reason 必填留痕。不改组合，组合预检由守护 v2.3 门控兜底（失败不 kill 旧 web）。两道门控：① **本 web 进程内**是否调用过预检工具（preflight_check），未调用则拒绝（进程级判据，§5.11 §3）；② **是否有在飞分身**（派生会话最近仍在活动）——它们与 web 同进程，重启会直接斩断且无法恢复，故拒绝，除非传 force: true。',
     parameters: {
       reason: { type: 'string', required: true, description: '重启原因（决策记录，记入日志）' },
-      profile: { type: 'string', description: '目标 profile（默认 web）' }
+      profile: { type: 'string', description: '目标 profile（默认 web）' },
+      force: { type: 'boolean', description: '有在飞分身时仍强制重启（后果：那些分身的工作会丢失，且它们不可恢复）' }
     },
     output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, note: { type: 'string' }, error: { type: 'string' } } }, render: (_a: any, v: any) => [{ type: 'text', text: v.ok ? (v.note ?? 'ok') : (v.error ?? '') }] },
-    async execute(args: { reason: string; profile?: string }, exec) {
+    async execute(args: { reason: string; profile?: string; force?: boolean }, exec) {
       if (!args.reason || !args.reason.trim()) return { ok: false, error: 'reason 必填（重启是自主决策，必须留痕）' }
       // 【重启前预检校验 · 主人 2026-08-30】本 web 进程内必须调用过预检工具且通过，否则拒绝重启。
       // 判据是**进程级**（AGENTS.md §5.11 §3：不比对 sessionId，这是设计如此）；调用者身份只作证据留痕。
@@ -632,6 +643,37 @@ export function apply(ctx: Context, config: Config): void {
       } catch { /* 证据行落盘失败不阻断重启判定 */ }
       if (!gate.ok) {
         return { ok: false, error: '重启被拒绝：' + gate.reason + '。请先调用 preflight_check 预检工具（通过后）再重启。' }
+      }
+      // 【在飞分身门控 · 2026-09-22 主人：「重启的时候会打断分身，想办法解决一下」】
+      // 子代理与 web **同进程**：kill 即斩断，而它不可寻址（不是 teammate）、不是 job、无 settle 通知
+      // ⇒ 重启 = 整轮工作蒸发（当日实测：分身最后产出 14:57:27，我 14:57:32 重启）。
+      // 判据本体 = findInFlightSubagents（纯函数，含对照组测例：超窗/无事件/主会话必须放行）。
+      let inflight: ReturnType<typeof findInFlightSubagents> = []
+      let inflightLine: string
+      if (config.inflightWindowMs > 0) {
+        try {
+          const sessions = (ctx as Context & { sessions?: { list(): SessionListItem[] } }).sessions?.list() ?? []
+          inflight = findInFlightSubagents(sessions, Date.now(), config.inflightWindowMs)
+          inflightLine = '在飞分身检查：候选会话 ' + String(sessions.length) + ' · 命中 ' + String(inflight.length) + (inflight.length > 0 ? ' · ' + describeInFlight(inflight) : '（放行）')
+        } catch (e) {
+          // 会话面抛错（cordis 严格代理）不阻断重启，但必须**留痕说明「放行了，因为查不到」**——
+          // 静默放行与静默拒绝一样是欺骗（§5.10 规则 3 静默失败 = 死亡温床）。
+          inflightLine = '在飞分身检查：查询失败，按放行处理（' + (e instanceof Error ? e.message : String(e)) + '）'
+        }
+      } else {
+        inflightLine = '在飞分身检查：已按配置关闭（inflightWindowMs=0）——重启将不检查在飞分身'
+      }
+      logger.info(inflightLine)
+      try {
+        const fs = await import('node:fs')
+        const dir = config.dshHome || process.env.DSH_HOME || ''
+        if (dir) fs.appendFileSync(join(dir, '.plugin-manager-events.log'), '[' + new Date().toISOString() + '] ' + inflightLine + '\n')
+      } catch { /* 证据行落盘失败不阻断重启判定 */ }
+      if (inflight.length > 0 && args.force !== true) {
+        return {
+          ok: false,
+          error: '重启被拒绝：' + describeInFlight(inflight) + '。它们与 web **同进程**，重启会直接斩断且**无法恢复**（不是 teammate、不是 job、也没有完成通知）。请等它们收工；确要立刻重启请传 force: true（后果：这些分身的工作会丢失）。',
+        }
       }
       const dshHome = config.dshHome || process.env.DSH_HOME || ''
       // 【触发者绑定 · 主人 2026-09-14】唤醒目标 = **发起本次重启的那个会话**（exec.agent），
