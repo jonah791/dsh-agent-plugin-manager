@@ -133,6 +133,60 @@ export function describeInFlight(list: readonly InFlightSubagent[]): string {
   return String(list.length) + ' 个分身正在跑：' + parts.join(' · ')
 }
 
+// ── 会话目录来源（2026-09-22 实证修正 · 上面那条内存判据实测无效）────────────
+//
+// 真机日志原文：「在飞分身检查：候选会话 2 · 命中 0（放行）」——而此刻**确有一个分身正在跑**
+// （它的会话目录 mtime 正是它在写入的时刻）。⇒ **内存里的会话表不含在飞的子代理**；
+// 文件系统才是真源：`<DSH_HOME>/sessions/<工作区组>/<会话id>/`。
+//
+// 怎么把「子代理会话」与「人类/并行实例的会话」分开？——用**本仓既有的 id 约定**：
+//   子代理   = **裸 uuid**（无 `session-` 前缀；见 `pickActiveSessionId` 的测例 `5bb40b68-bare-uuid`）
+//   用户会话 = `session-<uuid>`
+// 据此过滤既精确（不把并行实例的会话误判成分身），又不依赖任何内存 API。
+
+const BARE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** 会话目录项（IO 层查得后**显式传入**：纯逻辑不碰文件系统）。 */
+export type SessionDirEntry = { name: string; mtimeMs: number }
+
+/** 一个在飞分身会话（只要 id 与静默时长——拒绝消息要的就是这个）。 */
+export type InFlightSession = { id: string; ageMs: number }
+
+/**
+ * 从**会话目录列表**里挑出在飞的分身会话（纯函数，IO 由调用方注入）。
+ *
+ * 判据：名字是**裸 uuid**（子代理约定）且目录 mtime 在 `windowMs` 内。
+ * 为什么用 mtime：目录 mtime 在每次追加事件时刷新 ⇒ 「还在写」≈「还在跑」；
+ * 跑完的分身不再写 ⇒ 自然滑出窗口，**不需要任何清理逻辑**（无状态，最不容易坏）。
+ *
+ * 边界：① 名字带 `session-` 前缀的一律不算（那是用户/并行实例的会话）；
+ * ② mtime 缺失/非法 ⇒ 跳过（宁可漏报）；**未来值 ⇒ 按在飞处理**（时钟偏移时倾向保护）。
+ */
+export function findInFlightSessionDirs(
+  dirs: Iterable<SessionDirEntry>,
+  nowMs: number,
+  windowMs: number,
+): InFlightSession[] {
+  const out: InFlightSession[] = []
+  for (const d of dirs) {
+    if (d === null || typeof d !== 'object') continue
+    if (typeof d.name !== 'string' || !BARE_UUID_RE.test(d.name)) continue
+    const m = d.mtimeMs
+    if (typeof m !== 'number' || !Number.isFinite(m) || m <= 0) continue
+    const age = nowMs - m
+    if (age > windowMs) continue
+    out.push({ id: d.name, ageMs: age })
+  }
+  return out
+}
+
+/** 在飞分身会话的一行可读描述（空清单 → 空串）。 */
+export function describeInFlightSessions(list: readonly InFlightSession[]): string {
+  if (list.length === 0) return ''
+  const parts = list.map((x) => x.id + '（最后写入 ' + String(Math.max(0, Math.round(x.ageMs / 1000))) + 's 前）')
+  return String(list.length) + ' 个分身会话仍在写入：' + parts.join(' · ')
+}
+
 /** loader 条目（cordis loader 的鸭子类型）。 */
 export type LoaderEntryLike = { options?: { name?: string }; disabled?: boolean }
 

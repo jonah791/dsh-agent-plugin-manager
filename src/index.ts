@@ -28,7 +28,9 @@ import {
   anyBuildNewerThan,
   DEFAULT_INFLIGHT_WINDOW_MS,
   describeInFlight,
+  describeInFlightSessions,
   filterArchives,
+  findInFlightSessionDirs,
   findInFlightSubagents,
   isValidPluginName,
   loaderSnapshotOf,
@@ -38,6 +40,7 @@ import {
   scaffoldSource,
   thirdPartyRefusal,
   type LifecycleAction,
+  type SessionDirEntry,
   type SessionListItem,
 } from './ops-logic.ts'
 import { appendLineSafe, formatEventLine } from './event-log.ts'
@@ -140,6 +143,41 @@ export interface PluginManagerOps {
 function resolveActiveSessionId(ctx: Context, mainSessionId: string): string | null {
   const list = (ctx as Context & { sessions?: { list(): SessionListItem[] } }).sessions?.list() ?? []
   return pickActiveSessionId(list, mainSessionId)
+}
+
+/**
+ * 扫会话目录（IO 层）：`<dshHome>/sessions/<工作区组>/<会话 id>/` → `{ name, mtimeMs }`。
+ *
+ * 扫**全部**工作区组：任何工作区里的子代理都活在同一个 web 进程里，重启一样会斩断它们。
+ * 目录不存在 / 不可读 ⇒ 空数组（调用方按「不命中」处理并留痕，**绝不抛**——这里跑在重启决策路径上）。
+ * 名字先做粗筛（`session-` 前缀或 hex 开头）以减少 stat 次数；精确判据在纯函数里。
+ */
+function listInflightScanDirs(dshHome: string): SessionDirEntry[] {
+  const out: SessionDirEntry[] = []
+  if (dshHome === '') return out
+  const root = join(dshHome, 'sessions')
+  let groups: string[]
+  try {
+    groups = readdirSync(root)
+  } catch {
+    return out
+  }
+  for (const g of groups) {
+    if (!g.startsWith('--')) continue
+    let names: string[]
+    try {
+      names = readdirSync(join(root, g))
+    } catch {
+      continue
+    }
+    for (const n of names) {
+      if (!n.startsWith('session-') && !/^[0-9a-f]{8}-/i.test(n)) continue
+      try {
+        out.push({ name: n, mtimeMs: statSync(join(root, g, n)).mtimeMs })
+      } catch { /* 扫描间隙消失 / 不可读 ⇒ 跳过该条 */ }
+    }
+  }
+  return out
 }
 
 export function createOps(ctx: Context, config: Config, loader: { entries(): Iterable<{ options: { name?: string }; disabled?: boolean }> }): PluginManagerOps {
@@ -649,17 +687,30 @@ export function apply(ctx: Context, config: Config): void {
       // ⇒ 重启 = 整轮工作蒸发（当日实测：分身最后产出 14:57:27，我 14:57:32 重启）。
       // 判据本体 = findInFlightSubagents（纯函数，含对照组测例：超窗/无事件/主会话必须放行）。
       let inflight: ReturnType<typeof findInFlightSubagents> = []
+      let inflightDirs: ReturnType<typeof findInFlightSessionDirs> = []
       let inflightLine: string
       if (config.inflightWindowMs > 0) {
+        const nowMs = Date.now()
+        const notes: string[] = []
+        // 来源①：内存会话表。⚠ **实测不含在飞子代理**（真机日志：候选会话 2 · 命中 0，而分身确在跑），
+        // 保留它成本近零、且能覆盖别的形态，但**不能**作为唯一判据。
         try {
           const sessions = (ctx as Context & { sessions?: { list(): SessionListItem[] } }).sessions?.list() ?? []
-          inflight = findInFlightSubagents(sessions, Date.now(), config.inflightWindowMs)
-          inflightLine = '在飞分身检查：候选会话 ' + String(sessions.length) + ' · 命中 ' + String(inflight.length) + (inflight.length > 0 ? ' · ' + describeInFlight(inflight) : '（放行）')
+          inflight = findInFlightSubagents(sessions, nowMs, config.inflightWindowMs)
+          notes.push('内存会话表 ' + String(sessions.length) + ' 个→命中 ' + String(inflight.length))
         } catch (e) {
-          // 会话面抛错（cordis 严格代理）不阻断重启，但必须**留痕说明「放行了，因为查不到」**——
-          // 静默放行与静默拒绝一样是欺骗（§5.10 规则 3 静默失败 = 死亡温床）。
-          inflightLine = '在飞分身检查：查询失败，按放行处理（' + (e instanceof Error ? e.message : String(e)) + '）'
+          notes.push('内存会话表 查询失败→按不命中（' + (e instanceof Error ? e.message : String(e)) + '）')
         }
+        // 来源②：**会话目录**（真源）——子代理会话以**裸 uuid** 命名落在磁盘上，目录 mtime = 最后写入。
+        try {
+          const dirs = listInflightScanDirs(config.dshHome || process.env.DSH_HOME || '')
+          inflightDirs = findInFlightSessionDirs(dirs, nowMs, config.inflightWindowMs)
+          notes.push('会话目录 ' + String(dirs.length) + ' 个→命中 ' + String(inflightDirs.length))
+        } catch (e) {
+          notes.push('会话目录 扫描失败→按不命中（' + (e instanceof Error ? e.message : String(e)) + '）')
+        }
+        const hit = inflight.length + inflightDirs.length
+        inflightLine = '在飞分身检查：' + notes.join(' · ') + (hit > 0 ? ' ⇒ 拒绝' : ' ⇒ 放行')
       } else {
         inflightLine = '在飞分身检查：已按配置关闭（inflightWindowMs=0）——重启将不检查在飞分身'
       }
@@ -669,10 +720,11 @@ export function apply(ctx: Context, config: Config): void {
         const dir = config.dshHome || process.env.DSH_HOME || ''
         if (dir) fs.appendFileSync(join(dir, '.plugin-manager-events.log'), '[' + new Date().toISOString() + '] ' + inflightLine + '\n')
       } catch { /* 证据行落盘失败不阻断重启判定 */ }
-      if (inflight.length > 0 && args.force !== true) {
+      if ((inflight.length > 0 || inflightDirs.length > 0) && args.force !== true) {
+        const why = [describeInFlight(inflight), describeInFlightSessions(inflightDirs)].filter((s) => s !== '').join('；')
         return {
           ok: false,
-          error: '重启被拒绝：' + describeInFlight(inflight) + '。它们与 web **同进程**，重启会直接斩断且**无法恢复**（不是 teammate、不是 job、也没有完成通知）。请等它们收工；确要立刻重启请传 force: true（后果：这些分身的工作会丢失）。',
+          error: '重启被拒绝：' + why + '。它们与 web **同进程**，重启会直接斩断且**无法恢复**（不是 teammate、不是 job、也没有完成通知）。请等它们收工；确要立刻重启请传 force: true（后果：这些分身的工作会丢失）。',
         }
       }
       const dshHome = config.dshHome || process.env.DSH_HOME || ''
