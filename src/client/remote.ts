@@ -12,11 +12,18 @@ const pluginSchema = z.object({
   config: z.record(z.string(), z.unknown()).optional(),
 })
 
-const listResult: TypertCodec = { mode: 'strict', typeSymbol: 'pluginManager#ListResult', schema: z.object({ plugins: z.array(pluginSchema) }) }
-const inspectResult: TypertCodec = { mode: 'strict', typeSymbol: 'pluginManager#InspectResult', schema: z.object({ plugin: pluginSchema.nullable() }) }
-const nameRequest: TypertCodec = { mode: 'strict', typeSymbol: 'pluginManager#NameRequest', schema: z.object({ name: z.string(), profile: z.string().optional() }) }
-const createRequest: TypertCodec = { mode: 'strict', typeSymbol: 'pluginManager#CreateRequest', schema: z.object({ name: z.string(), description: z.string().optional() }) }
-const opResult: TypertCodec = { mode: 'strict', typeSymbol: 'pluginManager#OpResult', schema: z.union([
+const listResult: TypertCodec = { mode: 'strict', typeSymbol: 'pluginManager#ListResult', create: () => z.object({ plugins: z.array(pluginSchema) }) }
+// 注意：**不要**在本命名空间里声明 `inspect`。
+// @deepseek-ai/dsh-plugin-manager（官方，0.1.7 起由 dsh-api-remotes 挂载）在同一个
+// `pluginManager` 命名空间里也声明了 direct 方法 `inspect`；客户端 §validateContribution
+// 对 (namespace, kind, method) 做全局唯一校验，重复即抛
+// `client api: direct method pluginManager/inspect is already mounted`，
+// 而 api-remotes 的 apply 是单一 try/catch —— 它一抛，21 个 remote 命名空间全部回滚，
+// 整个 Web UI 起不来。本插件的宿主侧 `@Remote('inspect')` 仍然保留（plugin_inspect 工具在用），
+// 只是不再从客户端声明调用入口。
+const nameRequest: TypertCodec = { mode: 'strict', typeSymbol: 'pluginManager#NameRequest', create: () => z.object({ name: z.string(), profile: z.string().optional() }) }
+const createRequest: TypertCodec = { mode: 'strict', typeSymbol: 'pluginManager#CreateRequest', create: () => z.object({ name: z.string(), description: z.string().optional() }) }
+const opResult: TypertCodec = { mode: 'strict', typeSymbol: 'pluginManager#OpResult', create: () => z.union([
   z.object({ ok: z.literal(true), note: z.string().optional(), dir: z.string().optional() }),
   z.object({ ok: z.literal(false), error: z.string() }),
 ]) }
@@ -25,7 +32,6 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespaceMap {
     pluginManager: {
       list: () => Promise<import('@deepseek-ai/dsh-typert-protocol').RemoteResult<{ plugins: unknown[] }>>
-      inspect: (req: { name: string }) => Promise<import('@deepseek-ai/dsh-typert-protocol').RemoteResult<{ plugin: unknown }>>
       start: (req: { name: string; profile?: string }) => Promise<import('@deepseek-ai/dsh-typert-protocol').RemoteResult<{ ok: boolean; error?: string; note?: string }>>
       stop: (req: { name: string; profile?: string }) => Promise<import('@deepseek-ai/dsh-typert-protocol').RemoteResult<{ ok: boolean; error?: string; note?: string }>>
       unmount: (req: { name: string; profile?: string }) => Promise<import('@deepseek-ai/dsh-typert-protocol').RemoteResult<{ ok: boolean; error?: string; note?: string }>>
@@ -40,7 +46,6 @@ export const TYPERT_REMOTE: TypertRemoteContribution = {
   package: 'dsh-agent-plugin-manager',
   descriptors: [
     { id: 'dsh-agent-plugin-manager#pluginManager/list', service: 'pluginManagerRemote', namespace: 'pluginManager', method: 'list', implementation: 'dsh-agent-plugin-manager', invocation: { kind: 'direct' }, parameters: [], result: listResult, sourceLocation: { file: 'src/remote.ts', line: 1, column: 1 } },
-    { id: 'dsh-agent-plugin-manager#pluginManager/inspect', service: 'pluginManagerRemote', namespace: 'pluginManager', method: 'inspect', implementation: 'dsh-agent-plugin-manager', invocation: { kind: 'direct' }, parameters: reqParam(nameRequest), result: inspectResult, sourceLocation: { file: 'src/remote.ts', line: 1, column: 1 } },
     { id: 'dsh-agent-plugin-manager#pluginManager/start', service: 'pluginManagerRemote', namespace: 'pluginManager', method: 'start', implementation: 'dsh-agent-plugin-manager', invocation: { kind: 'direct' }, parameters: reqParam(nameRequest), result: opResult, sourceLocation: { file: 'src/remote.ts', line: 1, column: 1 } },
     { id: 'dsh-agent-plugin-manager#pluginManager/stop', service: 'pluginManagerRemote', namespace: 'pluginManager', method: 'stop', implementation: 'dsh-agent-plugin-manager', invocation: { kind: 'direct' }, parameters: reqParam(nameRequest), result: opResult, sourceLocation: { file: 'src/remote.ts', line: 1, column: 1 } },
     { id: 'dsh-agent-plugin-manager#pluginManager/unmount', service: 'pluginManagerRemote', namespace: 'pluginManager', method: 'unmount', implementation: 'dsh-agent-plugin-manager', invocation: { kind: 'direct' }, parameters: reqParam(nameRequest), result: opResult, sourceLocation: { file: 'src/remote.ts', line: 1, column: 1 } },

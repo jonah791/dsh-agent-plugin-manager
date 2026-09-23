@@ -2,7 +2,8 @@
  * 插件管理器 client 插件：$mount remote + 注册会话头「插件」动作（任务板旁边）。
  * @module dsh-agent-plugin-manager/client
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+// 0.1.7 契约：聚合包 `dsh-client-runtime/client` 已被上游移除；ClientContext 回到属主 @deepseek-ai/cordis
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { PluginManagerAction } from './PluginManagerAction.tsx'
