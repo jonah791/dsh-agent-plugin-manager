@@ -35,12 +35,14 @@
                              "@deepseek-ai/dsh-client-ui-settings":  "^0.1.0-rc.6",
                              "@deepseek-ai/dsh-client-ui-slots":  "^0.1.0-rc.6",
                              "@deepseek-ai/dsh-client-locale":  "^0.1.0-rc.6",
-                             "react":  "^18.2.0"
+                             "react":  "^18.2.0",
+                             "zod":  "^4.4.3"
                          },
     "devDependencies":  {
                             "@types/node":  "^22.0.0",
                             "@types/js-yaml":  "^4.0.9",
                             "@types/react":  "~18.3.1",
+                            "tsdown":  "0.22.2",
                             "typescript":  "^5.9.3"
                         },
     "allowScripts":  [
@@ -48,7 +50,7 @@
                      ],
     "scripts":  {
                     "build":  "tsc -p tsconfig.json",
-                    "typecheck":  "tsc -p tsconfig.json --noEmit",
+                    "typecheck":  "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
                     "test": "node --test \"tests/*.test.mjs\" \"test/*.test.mjs\""
                 },
     "dsh":  {
