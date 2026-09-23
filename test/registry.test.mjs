@@ -38,6 +38,37 @@ test('parsePatchRows: 文本回退（坏 YAML）', () => {
   assert.deepEqual(rows.map((r) => r.id), ['a', 'b'])
 })
 
+test('parsePatchRows: 回退必须填 name——真 patch 含 cordis 专有 !!js 标签，回退是唯一路径', () => {
+  // 真实形状（cordis.patch.yml:425-433 逐字）：`disabled: !!js <表达式>` 让标准 YAML 解析器抛错
+  // （python: ConstructorError tag:yaml.org,2002:js / node: YAMLException unknown tag），
+  // 于是**永远**走文本回退。旧回退只扫 `- id:` 而不填 name ⇒ 按包名查行恒落空
+  // ⇒ configure / start / stop / unmount 全部误报「插件未挂载到 web」（2026-09-23 事故）。
+  const real = [
+    '- insert:',
+    '    - id: agent-dream-tavern',
+    '      name: dsh-dream-tavern',
+    '      config:',
+    '        maxTokens: 4000',
+    '    - id: tool-wsl',
+    "      name: 'dsh-tool-wsl'",
+    "      disabled: !!js process.platform !== 'win32'",
+  ].join('\n')
+  const rows = parsePatchRows(real)
+  const tavern = rows.find((r) => r.name === 'dsh-dream-tavern')
+  assert.ok(tavern !== undefined, '按 name 必须能查到行——这是 findRow 的判据')
+  assert.equal(tavern.id, 'agent-dream-tavern')
+  const wsl = rows.find((r) => r.name === 'dsh-tool-wsl')
+  assert.ok(wsl !== undefined, '带引号的 name 也要能解析')
+  assert.equal(wsl.id, 'tool-wsl')
+  assert.equal(wsl.disabled, false, '!!js 表达式不是字面 true ⇒ 不算停用')
+})
+
+test('parsePatchRows: 回退里的 disabled 与 YAML 分支同形（布尔，不是 undefined）', () => {
+  const rows = parsePatchRows('- id: a\n  name: dsh-a\n  disabled: true\n- id: b\n  name: dsh-b\n')
+  assert.equal(rows.find((r) => r.id === 'a').disabled, true)
+  assert.equal(rows.find((r) => r.id === 'b').disabled, false)
+})
+
 test('extractTools: 从源码抓 defineTool 名', () => {
   const dir = join(tmp, 'tools')
   mkdirSync(join(dir, 'src'), { recursive: true })

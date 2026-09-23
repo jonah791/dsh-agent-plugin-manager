@@ -124,10 +124,38 @@ export function parsePatchRows(patchText: string): PatchRow[] {
     }
   } catch { /* 回退文本扫描 */ }
   if (rows.length === 0) {
-    for (const line of patchText.split(/\r?\n/)) {
-      const m = line.match(/^\s*- id:\s*([\w@./-]+)/)
-      if (m && m[1]) rows.push({ id: m[1] })
+    // ⚠ 这条回退分支是**唯一能用的路径**，不是异常兜底。
+    //
+    // 2026-09-23 根因确认：profile 的 patch 含 cordis 专有的 `!!js <表达式>` 标签
+    // （实测 `cordis.patch.yml:427` / `:433`：`disabled: !!js process.platform !== 'win32'`），
+    // 标准 YAML 解析器一律拒收——python 报 `ConstructorError ... tag:yaml.org,2002:js`，
+    // node 报 `YAMLException unknown tag !<tag:yaml.org,2002:js>` ⇒ `yaml.load` **每次都抛**。
+    //
+    // 事故：旧回退**只扫 `- id:`**（不填 `name`）。而调用方 `findArchive` 按**包名**查、
+    // `findRow` 按 `id` 或 `name` 查 ⇒ 用包名调用时 findArchive 命中、findRow 落空，
+    // 于是**一切 name 型管理操作**（configure / start / stop / unmount）都误报
+    // 「插件未挂载到 <profile>」，而**没有任何一个入参能同时满足两边**（id 过 findRow 但过不了
+    // findArchive）。回退必须补齐 `name` 与 `disabled`，与 YAML 分支产出同形。
+    let cur: { id: string; name?: string; disabled?: boolean } | null = null
+    const flush = (): void => {
+      // 与 YAML 分支**产出同形**：`disabled` 一律是布尔（不是 undefined），
+      // 否则调用方的 `row.disabled === !enabled` 会因类型不同而失配。
+      if (cur !== null) rows.push({ id: cur.id, name: cur.name, disabled: cur.disabled === true })
+      cur = null
     }
+    for (const line of patchText.split(/\r?\n/)) {
+      const mId = line.match(/^\s*- id:\s*([\w@./-]+)/)
+      if (mId && mId[1] !== undefined) {
+        flush()
+        cur = { id: mId[1] }
+        continue
+      }
+      if (cur === null) continue
+      const mName = line.match(/^\s+name:\s*['"]?([\w@./-]+)['"]?\s*$/)
+      if (mName && mName[1] !== undefined) { cur.name = mName[1]; continue }
+      if (/^\s+disabled:\s*true\s*$/.test(line)) cur.disabled = true
+    }
+    flush()
   }
   return rows
 }
