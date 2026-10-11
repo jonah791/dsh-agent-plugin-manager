@@ -17,9 +17,29 @@ import {
   anyBuildNewerThan,
   pickActiveSessionId,
   pluginListLines,
+  pluginRowId,
   publicArchive,
   scaffoldSource,
 } from '../lib/ops-logic.js'
+
+// ── 行 id 推导（2026-09-26 修「name 双前缀」缺陷的回归判据）──────────
+test('pluginRowId: dsh-agent-* 不再叠加前缀', () => {
+  assert.equal(pluginRowId('dsh-agent-repair'), 'agent-repair')
+  assert.equal(pluginRowId('dsh-agent-skill-lifecycle'), 'agent-skill-lifecycle')
+  assert.equal(pluginRowId('dsh-agent-vision'), 'agent-vision')
+})
+
+test('pluginRowId: 不含 agent- 的包名保持原约定（存量结果不变）', () => {
+  assert.equal(pluginRowId('dsh-temporal-self'), 'agent-temporal-self')
+  assert.equal(pluginRowId('dsh-my-tool'), 'agent-my-tool')
+  assert.equal(pluginRowId('my-tool'), 'agent-my-tool')
+})
+
+test('scaffoldSource: 骨架 export name 与 pluginRowId 同源（无 agent-agent-）', () => {
+  const src = scaffoldSource('dsh-agent-probe', 'x')
+  assert.match(src, /export const name = "agent-probe"/)
+  assert.doesNotMatch(src, /agent-agent-/)
+})
 
 // ── 插件名校验 ──────────────────────────────────────────────────────
 test('isValidPluginName: 合法名通过、非法名拒绝（不落盘）', () => {
@@ -179,11 +199,23 @@ test('pluginListLines: 空列表 → 空行数组（不抛）', () => {
 })
 
 // ── 脚手架模板 ──────────────────────────────────────────────────────
-test('scaffoldSource: 插件名映射为 agent-* id，描述写入注释与 README 行', () => {
+test('scaffoldSource: 插件名映射为 agent-* id · 描述进注释 · 且**不含已废弃的 ready 事件**', () => {
   const src = scaffoldSource('dsh-my-tool', '一句话用途')
-  assert.ok(src.includes('/** dsh-my-tool：一句话用途 */'))
-  assert.ok(src.includes('export const name = "agent-my-tool"'))
-  assert.ok(src.includes('ctx.logger("dsh-my-tool")'))
+  assert.ok(src.includes('/** dsh-my-tool：一句话用途 */'), '描述必须进注释（生成者一眼看到用途）')
+  assert.ok(src.includes('export const name = "agent-my-tool"'), '插件 id 映射为 agent-*')
+  assert.ok(src.includes('export function apply(ctx: Context, config: Config): void'), 'apply 签名必须在')
+  // ★ 2026-10-12：原两条断言（`ctx.logger("dsh-my-tool")` 与「README 行」）**在实现里都不存在** ⇒ 已删除。
+  //   ⚠ 它们是「断言写在**过去的**实现上」：文本类断言**不会自己过期报警**，
+  //   只会在某个时刻开始恒红 —— 而红的样子看起来像「实现坏了」，于是它会一直躺在体检报告里当噪音。
+  //   ⇒ 换成一条**钉住真实教训**的判据（比原断言强：它防的是「新插件开箱即编译失败」）。
+  //   ⚠⚠ 并且**必须先剥注释**：实现的注释里正解释着这条教训（写着 `ctx.on("ready", …)`），
+  //   不剥就等于「判据被自己的解释文案击穿」—— 这是今天第二次踩同一形状（manor 那边一次）。
+  const codeLines = src.split('\n').filter((l) => {
+    const t = l.trim()
+    return !t.startsWith('*') && !t.startsWith('//')
+  })
+  assert.equal(codeLines.some((l) => l.includes('ctx.on("ready"')), false,
+    '★ cordis 4 **没有** `ready` 事件 —— 骨架**代码**里出现它 ⇒ 新插件开箱即编译失败（2026-10-06 t-83cd062f）')
   assert.ok(src.endsWith('}\n'))
 })
 
