@@ -1,6 +1,7 @@
 /**
  * redact-config 单测（node --test，跑构建产物 lib/redact-config.js）
- * 判据：今天真实泄漏的两个键必须被脱敏；非密字段必须保留；**值不得以任何形态出现**（含长度/前缀）。
+ * 判据：事故形态的两个键（token / chat id）必须被脱敏；非密字段必须保留；**值不得以任何形态出现**（含长度/前缀）。
+ * ⚠ 夹具**必须是假值**——真实凭据永不入库（写在文件里的真值会随 push 永久公开）。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -13,8 +14,10 @@ const GUARDIAN_CONFIG = {
   port: 3080,
   baseUrl: 'http://127.0.0.1:3080',
   crashWindowMs: 30000,
-  telegramBotToken: '8796694295:AAEzbescz7u8SNiL0QeaawN1WZRs5UufVso',
-  telegramChatId: '8790460537',
+  // ⚠ 夹具一律用**假值**：本文件曾把主人真实凭据当夹具写进来，随 6292747 上了公开仓
+  // （2026-10-14 隐私扫描发现）。脱敏判据按**键名**，与值真假无关 ⇒ 假值一样能测。
+  telegramBotToken: '1000000001:FAKE-TOKEN-FOR-REDACTION-TEST-ONLY',
+  telegramChatId: '1000000002',
 }
 
 test('当天事故形态：telegramBotToken / telegramChatId 必须被脱敏', () => {
@@ -25,9 +28,9 @@ test('当天事故形态：telegramBotToken / telegramChatId 必须被脱敏', (
 
 test('尸体测试：脱敏后输出**不得**含原值任何形态（含片段与长度线索）', () => {
   const out = JSON.stringify(redactConfig(GUARDIAN_CONFIG))
-  assert.ok(!out.includes('8796694295'), '泄漏了 token 片段')
-  assert.ok(!out.includes('AAEzbescz7u8SNiL0QeaawN1WZRs5UufVso'), '泄漏了 token')
-  assert.ok(!out.includes('8790460537'), '泄漏了 chat id')
+  assert.ok(!out.includes('1000000001'), '泄漏了 token 片段')
+  assert.ok(!out.includes('FAKE-TOKEN-FOR-REDACTION-TEST-ONLY'), '泄漏了 token')
+  assert.ok(!out.includes('1000000002'), '泄漏了 chat id')
   assert.ok(out.includes('[redacted]'))
 })
 
