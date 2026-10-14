@@ -587,7 +587,7 @@ export function buildRegistry(selfPluginsDir: string, profilesDir: string): Plug
   const systemState = loadSystemState()
   // 非官方第三方（link 到 self-plugins 之外）：主人 2026-08-27 分类（自研/官方/非官方）
   // 2026-08-27 修复：thirdParty 排除已在 self archives 里的包名——其他 profile（如 at-test）的 link
-  // 可能指向旧路径（C:/Users/tr/Documents/...），导致 compact/memory 被误判第三方。包名已在自研库 =
+  // 可能指向旧路径（<home>/Documents/...），导致 compact/memory 被误判第三方。包名已在自研库 =
   // 自研优先（一个插件只有一个来源归属）。
   const selfNames = new Set(archives.map((a) => a.name))
   const thirdParty = scanThirdParty(profilesDir, selfPluginsDir).filter((a) => !selfNames.has(a.name))
