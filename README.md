@@ -14,7 +14,7 @@
   <a href="https://github.com/jonah791/dsh-agent-plugin-manager"><img src="https://img.shields.io/badge/version-0.1.3-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
-  <img src="https://img.shields.io/badge/tests-58%20passed-brightgreen" alt="tests">
+  <img src="https://img.shields.io/badge/tests-151%20passed-brightgreen" alt="tests">
 </p>
 
 **一句话**：DSH 的**插件档案库 + 生命周期操作面**——把「有哪些插件、什么来源、挂到哪个 profile、装了什么工具、配置是什么」变成一条命令可查，把「创建 / 挂载 / 启停 / 卸载 / 改配置」做成**带备份与回滚的闭环**，并附带一道会**拒绝执行**的重启闸门。
