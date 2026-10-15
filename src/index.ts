@@ -33,6 +33,7 @@ import {
   filterArchives,
   findInFlightSessionDirs,
   findInFlightSubagents,
+  findPluginsByToolQuery,
   isValidPluginName,
   loaderSnapshotOf,
   peerSatisfactionIssues,
@@ -46,6 +47,7 @@ import {
   SCAFFOLD_PNPM_WORKSPACE,
   scaffoldSource,
   thirdPartyRefusal,
+  toolFindLines,
   workspaceFileIssues,
   type LifecycleAction,
   type SessionDirEntry,
@@ -791,6 +793,39 @@ export function apply(ctx: Context, config: Config): void {
     async execute(args: { source?: string; status?: string }) {
       const plugins = filterArchives(ops.list(), { source: args.source, status: args.status })
       return { count: plugins.length, plugins: plugins.map(publicArchive) }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'tool_find',
+    description: '工具发现：从插件档案里按关键词找工具——答「我要做 X，该用哪个工具」。无 query 时给全域概览（域 + 工具数）；有 query 时在**插件名 / 用途 / 工具名**三处匹配，命中工具名则只列命中的。**零手写映射**（只用档案真源，不维护「意图→域」对照表——平行真源必然漂移）。无命中时如实标注这是**有界搜索**：「没找到」不等于「能力不存在」。',
+    parameters: {
+      query: { type: 'string', description: '关键词（工具名 / 用途 / 插件名 的子串，大小写不敏感）；省略 = 全域概览' },
+    },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          count: { type: 'number', required: true },
+          hits: { type: 'array', required: true, items: { type: 'object', additionalProperties: true } },
+        },
+      },
+      render: (a: any, v: any) => [{
+        type: 'text',
+        text: toolFindLines(v.hits, String((a && a.query) ?? '')).join('\n'),
+      }],
+    },
+    async execute(args: { query?: string }) {
+      const all = ops.list()
+      const hits = findPluginsByToolQuery(
+        all.map((p) => ({
+          name: String(p.name), version: String(p.version), source: String(p.source),
+          purpose: String(p.purpose ?? ''), tools: (p.tools ?? []) as string[],
+        })),
+        args.query ?? '',
+      )
+      // JSON 深拷贝 = 工具面安全投影（同 publicArchive 模式：剥离函数/undefined，带索引签名）
+      return { count: hits.length, hits: JSON.parse(JSON.stringify(hits)) as any }
     },
   }))
 

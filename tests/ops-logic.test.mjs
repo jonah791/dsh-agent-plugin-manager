@@ -20,6 +20,8 @@ import {
   pluginRowId,
   publicArchive,
   scaffoldSource,
+  findPluginsByToolQuery,
+  toolFindLines,
 } from '../lib/ops-logic.js'
 
 // ── 行 id 推导（2026-09-26 修「name 双前缀」缺陷的回归判据）──────────
@@ -223,4 +225,79 @@ test('scaffoldSource: 空描述/无 dsh- 前缀不抛（保守占位）', () => 
   const src = scaffoldSource('plain', '')
   assert.ok(src.includes('（待填写用途）'))
   assert.ok(src.includes('export const name = "agent-plain"'))
+})
+
+// ── 工具发现（tool_find 纯决策层 · 2026-10-15）────────────────────
+// 存在理由：工具面 424 个且平铺，当日我为查一个读数在 grep/读源码里绕了一圈
+//（ANIS arXiv:2610.15765v1 Discoverability：discovery 占 24.1–36.2% input token）。
+const TOOL_FIXTURE = [
+  { name: 'dsh-agent-memory', version: '0.16.0', source: 'self', purpose: '长期记忆：检索/记录/归档', tools: ['recall', 'remember', 'forget', 'memory_audit'] },
+  { name: 'dsh-agent-self-rewrite', version: '0.10.0', source: 'self', purpose: '自改写引擎：AGENTS.md 标记段的唯一写者', tools: ['rewrite_status', 'rewrite_verdict'] },
+  { name: 'dsh-tool-wsl', version: '0.3.0', source: 'self', purpose: 'WSL 命令行', tools: ['wsl', 'wsl_path'] },
+]
+
+test('findPluginsByToolQuery: 用途命中意图词（分=1，不列工具）', () => {
+  const hits = findPluginsByToolQuery(TOOL_FIXTURE, '记忆')
+  assert.equal(hits.length, 1)
+  assert.equal(hits[0].plugin, 'dsh-agent-memory')
+  assert.equal(hits[0].score, 1, '仅用途命中 ⇒ score=1')
+  assert.deepEqual(hits[0].matchedTools, [], '未命中工具名 ⇒ matchedTools 为空')
+})
+
+test('findPluginsByToolQuery: 工具名精确命中得最高分（=3）', () => {
+  const hits = findPluginsByToolQuery(TOOL_FIXTURE, 'rewrite_status')
+  assert.equal(hits.length, 1)
+  assert.equal(hits[0].plugin, 'dsh-agent-self-rewrite')
+  assert.equal(hits[0].score, 3)
+  assert.deepEqual(hits[0].matchedTools, ['rewrite_status'])
+})
+
+test('findPluginsByToolQuery: 工具名子串命中（=2）', () => {
+  const hits = findPluginsByToolQuery(TOOL_FIXTURE, 'memory_')
+  assert.equal(hits[0].plugin, 'dsh-agent-memory')
+  assert.equal(hits[0].score, 2)
+  assert.deepEqual(hits[0].matchedTools, ['memory_audit'])
+})
+
+test('findPluginsByToolQuery: 大小写不敏感', () => {
+  const hits = findPluginsByToolQuery(TOOL_FIXTURE, 'RECALL')
+  assert.equal(hits.length, 1)
+  assert.equal(hits[0].score, 3, '大小写不同仍应判精确命中')
+})
+
+// ★ 尸体样本①：不存在的词必须返回**空**，不得回落成「全部」
+test('尸体：不存在的词返回空（不回落成全部）', () => {
+  assert.deepEqual(findPluginsByToolQuery(TOOL_FIXTURE, 'zzz不存在zzz'), [])
+})
+
+test('findPluginsByToolQuery: 空 query = 全域概览（全部命中，score 均为 1）', () => {
+  const hits = findPluginsByToolQuery(TOOL_FIXTURE, '')
+  assert.equal(hits.length, 3)
+  assert.ok(hits.every((h) => h.score === 1), '空 query 下不应产生工具级高分')
+})
+
+test('toolFindLines: 无命中时标注「有界搜索」（不读成「能力不存在」）', () => {
+  const text = toolFindLines([], 'zzz').join('\n')
+  assert.match(text, /无命中/)
+  assert.match(text, /有界搜索/, '必须显式说明这是有界搜索的结论')
+  assert.match(text, /不等于该能力不存在/, '不得把「没找到」读成「不存在」')
+})
+
+// ★ 尸体样本②：概览模式**不得**展开工具名（否则 73 域 × N 工具会淹掉上下文）
+test('toolFindLines: 概览模式不展开工具名（体量可控）', () => {
+  const text = toolFindLines(findPluginsByToolQuery(TOOL_FIXTURE, ''), '').join('\n')
+  assert.match(text, /全域概览/)
+  assert.doesNotMatch(text, /recall/, '概览不得列出具体工具名')
+  assert.doesNotMatch(text, /rewrite_status/)
+})
+
+test('toolFindLines: 有 query 时列出命中工具（带「命中」标签）', () => {
+  const text = toolFindLines(findPluginsByToolQuery(TOOL_FIXTURE, 'recall'), 'recall').join('\n')
+  assert.match(text, /命中: recall/)
+})
+
+test('toolFindLines: 仅用途命中时标注「该域全部」（不假装是命中工具）', () => {
+  const text = toolFindLines(findPluginsByToolQuery(TOOL_FIXTURE, '记忆'), '记忆').join('\n')
+  assert.match(text, /该域全部: /)
+  assert.doesNotMatch(text, /命中: /, '用途命中不得冒充工具命中')
 })

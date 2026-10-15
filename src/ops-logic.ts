@@ -581,3 +581,88 @@ export function purgeReportLines(v: {
     : '· 留痕：' + (v.traceWritten ? '已写入 plugin-purge-trace.jsonl' : '写入失败（见日志）'))
   return lines
 }
+
+/**
+ * 工具发现（`tool_find` 的纯决策层）：从「插件 → 工具」档案里按关键词找工具。
+ *
+ * 存在理由（2026-10-15 实测痛点）：工具面已 **424 个**，是一张**平铺清单**。
+ * 当日我为了查「灵魂字节预算」这个读数，明明有 `rewrite_status` 一条命令就报，
+ * 却在 grep 与读源码里绕了一圈——**能力在，但找不到**。这正是 ANIS 论文
+ * （arXiv:2610.15765v1）的 Discoverability 属性：agent 花 **24.1–36.2%** input token
+ * 在 discovery 上，且论文实测「**投放文档没用**」（*shipping documentation does not help*）。
+ *
+ * 设计：**零手写映射**——匹配面只用档案里已有的真源（插件名 / 用途 / 工具名），
+ * 不维护第二份「意图 → 域」对照表（平行真源必然漂移，§5.22 判据单一真源）。
+ */
+
+export interface ToolFindHit {
+  plugin: string
+  version: string
+  source: string
+  purpose: string
+  tools: string[]
+  /** 命中的工具（query 命中工具名时非空；仅插件名/用途命中时为空数组）。 */
+  matchedTools: string[]
+  /** 排序分：工具名精确命中 3 · 工具名子串 2 · 插件名/用途命中 1。 */
+  score: number
+}
+
+/** 大小写不敏感子串匹配（needle 为空 ⇒ 恒真，用于概览）。 */
+function hit(haystack: string, needle: string): boolean {
+  if (needle === '') return true
+  return haystack.toLowerCase().includes(needle.toLowerCase())
+}
+
+/** 按关键词筛插件（无命中 ⇒ 空数组，**不回落成全部**）。 */
+export function findPluginsByToolQuery(
+  plugins: Array<{ name: string; version: string; source: string; purpose: string; tools: string[] }>,
+  query: string,
+): ToolFindHit[] {
+  const q = query.trim()
+  const out: ToolFindHit[] = []
+  for (const p of plugins) {
+    // 空 query = 概览：**不算工具级命中**——否则 `hit()` 恒真会让每域都拿 score=2，
+    // 概览与「工具级命中」就分不开了（2026-10-15 由 tests/ops-logic.test.mjs 的空 query 用例抓出）。
+    const matchedTools = q === '' ? [] : p.tools.filter((t) => hit(t, q))
+    const exactTool = q !== '' && p.tools.some((t) => t.toLowerCase() === q.toLowerCase())
+    const nameOrPurpose = hit(p.name, q) || hit(p.purpose, q)
+    if (matchedTools.length === 0 && !nameOrPurpose) continue
+    const score = exactTool ? 3 : (matchedTools.length > 0 ? 2 : 1)
+    out.push({
+      plugin: p.name, version: p.version, source: p.source, purpose: p.purpose,
+      tools: p.tools, matchedTools, score,
+    })
+  }
+  return out.sort((a, b) => (b.score - a.score) || a.plugin.localeCompare(b.plugin))
+}
+
+/**
+ * 行格式 —— 工具 render 与离线测试**共用同一份文案**（§5.22 判据单一真源）。
+ * 无 query ⇒ 只列域与工具数（概览）；有 query ⇒ 列命中工具（未命中工具名时列全部工具）。
+ */
+export function toolFindLines(hits: ToolFindHit[], query: string): string[] {
+  const q = query.trim()
+  if (hits.length === 0) {
+    return q === ''
+      ? ['工具发现：档案为空——没有任何插件登记工具。']
+      : [`工具发现：「${q}」无命中。`,
+         '⚠ 这是**有界搜索**：只说明档案里没有含该词的插件名/用途/工具名，**不等于该能力不存在**',
+         '   （可能是档案未登记，或它在一个未挂载的插件里）。换更短或更常见的词再试。']
+  }
+  const totalTools = hits.reduce((n, h) => n + h.tools.length, 0)
+  const head = q === ''
+    ? `工具发现：${hits.length} 个域 · ${totalTools} 个工具（无 query ⇒ 全域概览，不展开工具名）`
+    : `工具发现：「${q}」命中 ${hits.length} 个域 · 共 ${totalTools} 个工具`
+  const lines = [head, '']
+  for (const h of hits) {
+    lines.push(`${h.plugin} ${h.version} [${h.source}] — ${h.purpose || '(无用途描述)'}`)
+    if (q === '') {
+      lines.push(`    工具 ${h.tools.length} 个`)
+    } else {
+      const list = h.matchedTools.length > 0 ? h.matchedTools : h.tools
+      const tag = h.matchedTools.length > 0 ? '命中' : '该域全部'
+      lines.push(`    ${tag}: ${list.join(', ')}`)
+    }
+  }
+  return lines
+}
