@@ -22,6 +22,7 @@ import {
   scaffoldSource,
   findPluginsByToolQuery,
   toolFindLines,
+  firstSentence,
 } from '../lib/ops-logic.js'
 
 // ── 行 id 推导（2026-09-26 修「name 双前缀」缺陷的回归判据）──────────
@@ -300,4 +301,32 @@ test('toolFindLines: 仅用途命中时标注「该域全部」（不假装是�
   const text = toolFindLines(findPluginsByToolQuery(TOOL_FIXTURE, '记忆'), '记忆').join('\n')
   assert.match(text, /该域全部: /)
   assert.doesNotMatch(text, /命中: /, '用途命中不得冒充工具命中')
+})
+
+// ── 渲染层体量控制（2026-10-15 首调实测：未截断时 tool_find("记忆") 输出近 3000 字符）──
+test('firstSentence: 取首句 · 空串不抛 · 超长截断带省略号', () => {
+  assert.equal(firstSentence('第一句。第二句。'), '第一句')
+  assert.equal(firstSentence('只有一句没有标点'), '只有一句没有标点')
+  assert.equal(firstSentence(''), '')
+  assert.equal(firstSentence('   '), '')
+  const long = 'x'.repeat(300)
+  assert.ok(firstSentence(long).length <= 151, '超长必须截断')
+  assert.match(firstSentence(long), /…$/, '截断须带省略号（读者能看出被截了）')
+})
+
+test('toolFindLines: 空工具列表显示「(无工具登记)」（不显示空白）', () => {
+  const text = toolFindLines([{
+    plugin: '@deepseek-ai/dsh-tool-ralph', version: '0.1.0', source: 'official',
+    purpose: 'ralph 工具', tools: [], matchedTools: [], score: 1,
+  }], 'ralph').join('\n')
+  assert.match(text, /\(无工具登记\)/, '官方插件无工具登记时须显式标注，不能留空白')
+})
+
+test('toolFindLines: 长用途只在渲染层截断（数据层保真，不改档案）', () => {
+  const longPurpose = '很长的用途。' + 'x'.repeat(400)
+  const hits = findPluginsByToolQuery(
+    [{ name: 'p', version: '1', source: 'self', purpose: longPurpose, tools: ['t'] }], 'p')
+  const text = toolFindLines(hits, 'p').join('\n')
+  assert.ok(!text.includes('x'.repeat(200)), '超长用途不得原样进输出')
+  assert.equal(hits[0].purpose, longPurpose, '★ 数据层不得被改动——截断只发生在渲染层')
 })

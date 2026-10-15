@@ -640,6 +640,21 @@ export function findPluginsByToolQuery(
  * 行格式 —— 工具 render 与离线测试**共用同一份文案**（§5.22 判据单一真源）。
  * 无 query ⇒ 只列域与工具数（概览）；有 query ⇒ 列命中工具（未命中工具名时列全部工具）。
  */
+
+/**
+ * 用途取**首句**（仅渲染用，不改数据）：描述常带长解释（如 memory 插件的描述 2000+ 字符），
+ * 列表里只留一句——与 `catalog/gen-catalog.py` 同口径（那里也取首句）。
+ * ⚠ 本工具存在的意义是**省** discovery 成本，不能自己制造噪音（2026-10-15 首调实测：
+ * 未截断时 `tool_find("记忆")` 输出近 3000 字符）。
+ */
+export function firstSentence(text: string, max = 150): string {
+  const s = text.trim()
+  if (s === '') return ''
+  const head = (s.split(/[。；\n]|(?<=[a-z0-9)])\.\s/)[0] ?? '').trim()
+  const out = head === '' ? s : head
+  return out.length > max ? out.slice(0, max) + '…' : out
+}
+
 export function toolFindLines(hits: ToolFindHit[], query: string): string[] {
   const q = query.trim()
   if (hits.length === 0) {
@@ -655,13 +670,13 @@ export function toolFindLines(hits: ToolFindHit[], query: string): string[] {
     : `工具发现：「${q}」命中 ${hits.length} 个域 · 共 ${totalTools} 个工具`
   const lines = [head, '']
   for (const h of hits) {
-    lines.push(`${h.plugin} ${h.version} [${h.source}] — ${h.purpose || '(无用途描述)'}`)
+    lines.push(`${h.plugin} ${h.version} [${h.source}] — ${firstSentence(h.purpose) || '(无用途描述)'}`)
     if (q === '') {
       lines.push(`    工具 ${h.tools.length} 个`)
     } else {
       const list = h.matchedTools.length > 0 ? h.matchedTools : h.tools
       const tag = h.matchedTools.length > 0 ? '命中' : '该域全部'
-      lines.push(`    ${tag}: ${list.join(', ')}`)
+      lines.push(`    ${tag}: ${list.length > 0 ? list.join(', ') : '(无工具登记)'}`)
     }
   }
   return lines
