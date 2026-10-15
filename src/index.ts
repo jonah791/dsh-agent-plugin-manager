@@ -10,8 +10,9 @@
  * 本插件管插件（2026-08-30 对齐：旧 dsh-agent-watch 已退役拆分）。
  * @module dsh-agent-plugin-manager
  */
-import { mkdirSync, writeFileSync, existsSync, readFileSync, statSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, writeFileSync, existsSync, readFileSync, statSync, readdirSync, renameSync, appendFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -34,9 +35,14 @@ import {
   findInFlightSubagents,
   isValidPluginName,
   loaderSnapshotOf,
+  peerSatisfactionIssues,
   pickActiveSessionId,
   pluginListLines,
+  pluginRowId,
   publicArchive,
+  purgeReportLines,
+  registryHasIdFromText,
+  SCAFFOLD_PEER_DEPS,
   scaffoldSource,
   thirdPartyRefusal,
   type LifecycleAction,
@@ -44,6 +50,12 @@ import {
   type SessionListItem,
 } from './ops-logic.ts'
 import { appendLineSafe, formatEventLine } from './event-log.ts'
+// 第三方插件上游更新检查（§5.23 盲区补齐）：判据在纯层，网络/文件在 IO 层
+import { updateLine, type UpdateVerdict } from './update-check.ts'
+import { runUpdateCheck } from './update-io.ts'
+// MCP 服务器专项支持：它们住在 cordis.patch.yml 的 config.args 里（不在 profile 依赖中）
+import { mcpLine } from './mcp-check.ts'
+import { runMcpCheck } from './mcp-io.ts'
 import { writeSentinel } from './sentinel.ts'
 
 export { publicArchive } from './ops-logic.ts'
@@ -132,8 +144,49 @@ export interface PluginManagerOps {
   mount(name: string, profile: string, cfg?: Record<string, unknown>, caller?: CallerInfo | null): Promise<{ ok: boolean; error?: string; note?: string }>
   setEnabled(name: string, profile: string, enabled: boolean, caller?: CallerInfo | null): Promise<{ ok: boolean; error?: string; note?: string; bak?: string }>
   remove(name: string, profile: string, caller?: CallerInfo | null): Promise<{ ok: boolean; error?: string; note?: string }>
+  /**
+   * 彻底退役（purge）：`remove` 之外，把插件目录归档、并报告其余残留面。
+   *
+   * `remove` 只清「挂载点 + profile 依赖」两处；实测（2026-10-03，14 个历史卸载样本）
+   * 退役后 13/14 仍有残留：目录 + gitlink（1）、语义注册表条目（11）、技能引用（8）。
+   * 本方法是**两段式**：默认 `dryRun` 只出影响面；`apply: true` 才动手。
+   *
+   * 边界（明确不越界）：
+   * - **目录移入归档区**（`<dshHome>/archive/plugin-purge/`），**不物理删除** ⇒ 可回退；
+   * - **语义注册表条目与文档/技能引用只报告不改**——前者归 `dsh-semantic-docs`（它是 registry 的
+   *   owner），后者改指哪个新名需要判断，不能自动化；
+   * - **gitlink 只报告**（改主仓索引属"重"操作，给出命令由主体决定）。
+   */
+  purge(name: string, profile: string, opts: PurgeOptions, caller?: CallerInfo | null): Promise<PurgeResult>
   configure(name: string, profile: string, cfg: Record<string, unknown>, caller?: CallerInfo | null): Promise<{ ok: boolean; error?: string; note?: string }>
-  create(name: string, description: string): { ok: boolean; error?: string; dir?: string }
+  create(name: string, description: string): { ok: boolean; error?: string; dir?: string; warning?: string }
+}
+
+/** purge 的入参。 */
+export interface PurgeOptions {
+  /** true = 真正执行（卸载 + 归档）；缺省/false = 只出影响面（dry-run）。 */
+  apply?: boolean
+}
+
+/** purge 的影响面与结果（一次测量可判真假，见 docs/plans/deletion-capability-plan.md）。 */
+export interface PurgeResult {
+  ok: boolean
+  /** 本次是干跑还是真执行。 */
+  dryRun: boolean
+  name: string
+  profile: string
+  error?: string
+  note?: string
+  /** ① 插件目录（含 node_modules）——purge 的**唯一**执行动作。 */
+  dir: { exists: boolean; path: string; bytes: number; archivedTo?: string }
+  /** ② 主仓 gitlink（160000）。只报告：改索引属重操作。 */
+  gitlink: { mode: string | null; hint: string }
+  /** ③ 语义注册表条目（id 精确命中）。只报告：registry 的 owner 是 dsh-semantic-docs。 */
+  semantic: { entryId: string; present: boolean; hint: string }
+  /** ④ 技能/文档引用。只报告：改指需判断。 */
+  references: Array<{ where: string; hits: number }>
+  /** 是否写入 `<dshHome>/plugin-purge-trace.jsonl`。 */
+  traceWritten: boolean
 }
 // 脚手架模板实现见 ops-logic.ts（scaffoldSource，纯字符串生成，可离线单测）。
 
@@ -180,9 +233,122 @@ function listInflightScanDirs(dshHome: string): SessionDirEntry[] {
   return out
 }
 
+/** 递归求目录占用字节（IO）。失败/无权限的子树按 0 计——审计用途，不为统计精度中断退役。 */
+function dirSizeBytes(dir: string): number {
+  let total = 0
+  let entries: string[]
+  try {
+    entries = readdirSync(dir)
+  } catch {
+    return 0
+  }
+  for (const name of entries) {
+    const p = join(dir, name)
+    try {
+      const st = statSync(p)
+      if (st.isDirectory()) total += dirSizeBytes(p)
+      else total += st.size
+    } catch { /* 扫描间隙消失 / 不可读 ⇒ 跳过 */ }
+  }
+  return total
+}
+
+/** 主仓索引里该路径的 git mode（160000=gitlink；null=未纳管）。 */
+function gitIndexMode(cwd: string, rel: string): string | null {
+  try {
+    const out = execFileSync('git', ['ls-files', '-s', rel], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    const first = out.split('\n').find(l => l.trim() !== '')
+    return first === undefined ? null : first.split(/\s+/)[0] ?? null
+  } catch {
+    return null
+  }
+}
+
+/** 语义注册表里是否存在该 id（读文件 + 纯判据 `registryHasIdFromText`）。 */
+function registryHasId(registryPath: string, id: string): boolean {
+  try {
+    return registryHasIdFromText(readFileSync(registryPath, 'utf8'), id)
+  } catch {
+    return false
+  }
+}
+
+/** 扫「技能 / 文档」里对该插件名的引用（**只报告**：改指需判断）。 */
+function scanReferences(workspace: string, name: string): Array<{ where: string; hits: number }> {
+  const out: Array<{ where: string; hits: number }> = []
+  const targets: Array<{ where: string; dir: string }> = []
+  const home = process.env['USERPROFILE'] ?? process.env['HOME'] ?? ''
+  if (home !== '') targets.push({ where: '用户级技能', dir: join(home, '.agents', 'skills') })
+  try {
+    for (const g of readdirSync(join(workspace, 'docs'))) {
+      if (g.endsWith('.md')) targets.push({ where: `docs/${g}`, dir: '' })
+    }
+  } catch { /* docs 不存在 ⇒ 跳过 */ }
+
+  // 技能目录：逐技能读 SKILL.md
+  const skillTarget = targets.find(t => t.where === '用户级技能')
+  if (skillTarget !== undefined) {
+    let hits = 0
+    try {
+      for (const s of readdirSync(skillTarget.dir)) {
+        try {
+          if (readFileSync(join(skillTarget.dir, s, 'SKILL.md'), 'utf8').includes(name)) hits += 1
+        } catch { /* 无 SKILL.md ⇒ 跳过 */ }
+      }
+    } catch { /* 技能目录不存在 ⇒ 跳过 */ }
+    if (hits > 0) out.push({ where: '用户级技能', hits })
+  }
+  // docs 顶层 .md
+  let docHits = 0
+  try {
+    for (const f of readdirSync(join(workspace, 'docs'))) {
+      if (!f.endsWith('.md')) continue
+      try {
+        if (readFileSync(join(workspace, 'docs', f), 'utf8').includes(name)) docHits += 1
+      } catch { /* 忽略 */ }
+    }
+  } catch { /* 忽略 */ }
+  if (docHits > 0) out.push({ where: 'docs/*.md', hits: docHits })
+  return out
+}
+
+/** 时间戳（归档目录名用；本地可读，避免 UTC 日界混淆）。 */
+function stamp(): string {
+  const d = new Date()
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+}
+
+/** 追加一行退役留痕。吞错返回 false（观测不反噬）。 */
+function appendPurgeTrace(dshHome: string, row: Record<string, unknown>): boolean {
+  try {
+    mkdirSync(dshHome, { recursive: true })
+    appendFileSync(join(dshHome, 'plugin-purge-trace.jsonl'), JSON.stringify({ at: new Date().toISOString(), ...row }) + '\n', 'utf8')
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function createOps(ctx: Context, config: Config, loader: { entries(): Iterable<{ options: { name?: string }; disabled?: boolean }> }): PluginManagerOps {
   const logger = ctx.logger('plugin-manager')
   const require = createRequire(import.meta.url)
+  /**
+   * 宿主运行时版本——与兼容门**同源**：宿主的 `getDshRuntimeVersion()`
+   * （app-boot/src/plugin-compatibility.ts:44）读的就是 app-boot 自己的 package.json。
+   * 读不到 ⇒ `null`：对账时全部报「未判定」，**不静默通过**，也不回退到别的包猜版本。
+   * 吞错理由：解析失败是可预期的环境差异（不是所有 profile 都链了 app-boot），
+   * 而「读不到」本身就是要报出去的事实，不该抛。
+   */
+  const hostRuntimeVersion = (): string | null => {
+    try {
+      const pkgPath = require.resolve('@deepseek-ai/dsh-app-boot/package.json')
+      const v: unknown = JSON.parse(readFileSync(pkgPath, 'utf8')).version
+      return typeof v === 'string' && v.trim() !== '' ? v : null
+    } catch {
+      return null
+    }
+  }
   const dshHome = config.dshHome || process.env.DSH_HOME || ''
   const selfPluginsDir = config.selfPluginsDir || join(dshHome, 'self-plugins')
   const profilesDir = config.profilesDir || join(dshHome, 'profiles')
@@ -268,7 +434,7 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
       if (r1.bak) rollbackFile(join(profileDir, 'package.json'), r1.bak)
       return { ok: false, error: 'pnpm install 失败，已回滚: ' + inst.output.slice(-200) }
     }
-    const r2 = patchInsert(profileDir, 'agent-' + nm.replace(/^dsh-/, ''), nm, cfg)
+    const r2 = patchInsert(profileDir, pluginRowId(nm), nm, cfg)
     if (!r2.inserted) {
       if (r1.bak) rollbackFile(join(profileDir, 'package.json'), r1.bak)
       return { ok: false, error: 'patch 已存在同名行（依赖已回滚）' }
@@ -359,6 +525,87 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
       return { ok: true, note: '已卸载 ' + nm + '@' + profile + '；数据目录保留；哨兵已写，web 将重启生效' }
     },
 
+    async purge(nm: string, profile: string, opts: PurgeOptions, caller?: CallerInfo | null): Promise<PurgeResult> {
+      const apply = opts?.apply === true
+      const semId = nm.replace(/^dsh-/, '')
+      const scaffold = (over: Partial<PurgeResult> = {}): PurgeResult => ({
+        ok: false, dryRun: !apply, name: nm, profile,
+        dir: { exists: false, path: join(selfPluginsDir, nm), bytes: 0 },
+        gitlink: { mode: null, hint: '' },
+        semantic: { entryId: semId, present: false, hint: '' },
+        references: [],
+        traceWritten: false,
+        ...over,
+      })
+
+      const arch = findArchive(nm)
+      if (!arch) return scaffold({ error: '插件不存在: ' + nm })
+      const tp = refuseThirdParty(arch, 'unmount', nm, profile)
+      if (tp !== null && tp !== undefined) return scaffold({ error: tp.error ?? '第三方插件不支持彻底退役' })
+
+      // ── 影响面（干跑与真跑共用同一份读数）
+      const dirPath = join(selfPluginsDir, nm)
+      const dirExists = existsSync(dirPath)
+      const semPresent = registryHasId(join(workspace, 'docs', 'semantics', 'registry.json'), semId)
+      const gitMode = gitIndexMode(workspace, 'self-plugins/' + nm)
+      const refs = scanReferences(workspace, nm)
+      const impact: PurgeResult = scaffold({
+        ok: true,
+        dir: { exists: dirExists, path: dirPath, bytes: dirExists ? dirSizeBytes(dirPath) : 0 },
+        gitlink: {
+          mode: gitMode,
+          hint: gitMode === null ? '' : `git rm --cached self-plugins/${nm}（改主仓索引，由主体决定）`,
+        },
+        semantic: {
+          entryId: semId,
+          present: semPresent,
+          hint: semPresent
+            ? 'registry.json 的 owner 是 dsh-semantic-docs ⇒ 经它注销（或手工改条目后跑 semantic_check）'
+            : '',
+        },
+        references: refs,
+      })
+      if (!apply) {
+        return { ...impact, note: '干跑：未做任何改动。传 apply=true 执行（卸载 + 目录归档）。' }
+      }
+
+      // ── 执行 ①：若仍挂载，先走 remove（复用其预检与回滚保护）
+      const row = findRow(join(profilesDir, profile), nm)
+      if (row !== undefined && row !== null) {
+        const r = await this.remove(nm, profile, caller)
+        if (!r.ok) return { ...impact, ok: false, error: '卸载失败，未归档: ' + (r.error ?? '(无原因)') }
+      }
+
+      // ── 执行 ②：目录移入归档区（**不物理删除** ⇒ 可回退）
+      let archivedTo: string | undefined
+      if (dirExists) {
+        try {
+          const dest = join(dshHome, 'archive', 'plugin-purge', `${nm}-${stamp()}`)
+          mkdirSync(dirname(dest), { recursive: true })
+          renameSync(dirPath, dest)
+          archivedTo = dest
+        } catch (err) {
+          return { ...impact, ok: false, error: '目录归档失败（原目录未动）: ' + (err as Error).message }
+        }
+      }
+
+      // ── 执行 ③：留痕
+      const traceWritten = appendPurgeTrace(dshHome, {
+        action: 'purge', name: nm, profile, archivedTo: archivedTo ?? null,
+        bytes: impact.dir.bytes, gitlink: gitMode, semanticPresent: semPresent,
+        references: refs, caller: caller ?? null,
+      })
+      eventLog(`彻底退役 ${nm}@${profile}：目录 → ${archivedTo ?? '(无目录)'}；语义条目与引用未动（见影响面）`)
+      return {
+        ...impact,
+        dir: { ...impact.dir, archivedTo },
+        traceWritten,
+        note: `已彻底退役：目录归档至 ${archivedTo ?? '(无目录可归档)'}。`
+          + `语义条目${semPresent ? `仍在（${semId}，需 dsh-semantic-docs 注销）` : '不存在'}；`
+          + `引用 ${refs.length} 处未改动（改指需判断）。`,
+      }
+    },
+
     async configure(nm: string, profile: string, cfg: Record<string, unknown>, caller?: CallerInfo | null) {
       const arch = findArchive(nm)
       if (!arch) return { ok: false, error: '插件不存在: ' + nm }
@@ -393,7 +640,8 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
           main: 'lib/index.js', types: 'lib/types/index.d.ts',
           exports: { '.': { types: './lib/types/index.d.ts', default: './lib/index.js' }, './package.json': './package.json' },
           files: ['lib', 'README.md'], license: 'MIT',
-          peerDependencies: { '@deepseek-ai/cordis': '^4.0.1', '@deepseek-ai/schemastery': '^3.18.1-rc.1', '@deepseek-ai/dsh-tools': '^0.1.0-rc.6' },
+          // ⚠ 单一真源常量：范围写成 `^0.x` 会被宿主兼容门**静默** disable（见 SCAFFOLD_PEER_DEPS 的注释）
+          peerDependencies: SCAFFOLD_PEER_DEPS,
           devDependencies: { '@types/node': '^22.0.0', typescript: '^5.9.3' },
           scripts: { build: 'tsc -p tsconfig.json', typecheck: 'tsc -p tsconfig.json --noEmit' },
         }, null, 2) + '\n', 'utf8')
@@ -408,7 +656,17 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
         writeFileSync(join(dir, 'src/index.ts'), scaffoldSource(nm, description || ''), 'utf8')
         writeFileSync(join(dir, 'README.md'), '# ' + nm + '\n\n' + (description || '（待填写用途）') + '\n', 'utf8')
         eventLog('创建插件 ' + nm + ' @ ' + dir)
-        return { ok: true, dir }
+        // 守卫：新建即断言 peer 范围满足宿主运行时版本。**模板是缺口复制器**——不在这里拦，
+        // 每个未来产物都会带着同一个缺陷出去（2026-10-15 实测 · 台账 lh-ff4ea783）。
+        // ⚠ 不阻断创建：判据自身也可能读不到宿主版本，「未判定」必须报出来，而不是让创建失败。
+        const peerIssues = peerSatisfactionIssues(SCAFFOLD_PEER_DEPS, hostRuntimeVersion())
+        if (peerIssues.length === 0) return { ok: true, dir }
+        return {
+          ok: true,
+          dir,
+          warning: '脚手架 peer 范围与宿主运行时**不匹配**（该插件挂载后会被宿主静默 disable：'
+            + '挂载返回成功、patch 行也在，但一行不生效）：\n  ' + peerIssues.join('\n  '),
+        }
       } catch (err) {
         return { ok: false, error: '创建失败: ' + String(err) }
       }
@@ -523,6 +781,96 @@ export function apply(ctx: Context, config: Config): void {
   }))
 
   ctx.tools.register(defineTool({
+    name: 'plugin_update_check',
+    description: '第三方插件上游更新检查（只读·只报告）：枚举本机已装第三方插件 → 解析各自上游（spec 的 github 短写 / package.json repository / homepage）→ 查上游最新版本（npm registry latest → GitHub release → GitHub tag）→ 版本比较。**六档互不掩盖**：有更新 / 已最新 / 不可比（如 prerelease 标识不同）/ 无上游源 / 查询失败 / 已跳过——网络失败绝不读成「没更新」。不做自动升级：第三方升级要走「读上游 CHANGELOG → 换 pin → 重装 → 重启 → 黑盒验收」（§5.23）。',
+    parameters: {
+      only: { type: 'string', description: '只看某个插件名（可选）' },
+      timeoutMs: { type: 'number', description: '单个上游查询超时（ms，缺省 8000）' }
+    },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          checkedAt: { type: 'string', required: true },
+          counts: { type: 'object', additionalProperties: true, required: true },
+          coverage: { type: 'object', additionalProperties: true, required: true },
+          rows: { type: 'array', required: true, items: { type: 'object', additionalProperties: true } },
+        },
+      },
+      render: (_a: any, v: any) => {
+        const r = v.rows as Array<{ name: string; local: string; latest: string | null; verdict: string; note: string }>
+        const head = `第三方插件上游更新检查 @ ${v.checkedAt}`
+        const cov = `覆盖度：应查 ${v.coverage.expected} · 实查 ${v.coverage.queried}` +
+          (v.coverage.missing.length > 0 ? ` · ⚠ 漏查 ${v.coverage.missing.join(', ')}` : '')
+        const cnt = Object.entries(v.counts as Record<string, number>)
+          .filter(([, n]) => n > 0).map(([k, n]) => `${k}=${n}`).join(' · ')
+        const lines = r.map((x) => updateLine({
+          name: x.name, local: x.local, latest: x.latest,
+          verdict: x.verdict as UpdateVerdict, note: x.note,
+        }))
+        return [{ type: 'text', text: [head, cov, cnt, '', ...lines].join('\n') }]
+      },
+    },
+    async execute(args: { only?: string; timeoutMs?: number }) {
+      const report = await runUpdateCheck({
+        profilesDir: config.profilesDir || join(dshHome, 'profiles'),
+        selfPluginsDir: config.selfPluginsDir || join(dshHome, 'self-plugins'),
+        ...(args.only === undefined ? {} : { only: args.only }),
+        ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }),
+      })
+      logger.info(`更新检查：应查 ${report.coverage.expected} 实查 ${report.coverage.queried}` +
+        (report.coverage.missing.length > 0 ? ` 漏查 ${report.coverage.missing.join(',')}` : ''))
+      return report as any
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'plugin_mcp_check',
+    description: 'MCP 服务器专项体检（只读·只报告）：枚举各 profile 里 `@deepseek-ai/dsh-mcp-client` 注册行 → 解析在跑的是哪个包/哪个版本（npx/bunx 的 args）→ 判定健康档位 → 可选查上游最新版。**为什么 MCP 需要单独一档**：它们不在 profile 依赖里（住在 cordis.patch.yml 的 config.args），所以依赖扫描器结构上看不见；且有四档互不掩盖的健康状态——`active`（在跑）/ `disabled-in-patch`（配置有意停用）/ **`denied-runtime`（★ 配置启用但被 DSH 兼容性预检静默停用——只往 stderr 打一行，不进上下文）**/ `unknown`（缺日志证据，不猜）。另标出**浮动版本**（`@latest`/无版本 ⇒ 配置里不存在确定版本，每次启动可能换）。不写任何配置、不动任何 pin。',
+    parameters: {
+      profile: { type: 'string', description: '只看某个 profile（缺省=全部）' },
+      probeUpstream: { type: 'boolean', description: '是否查上游最新版（缺省 true；离线体检传 false）' },
+      timeoutMs: { type: 'number', description: '上游查询超时（ms，缺省 8000）' }
+    },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          checkedAt: { type: 'string', required: true },
+          log: { type: 'object', additionalProperties: true, required: true },
+          counts: { type: 'object', additionalProperties: true, required: true },
+          rows: { type: 'array', required: true, items: { type: 'object', additionalProperties: true } },
+        },
+      },
+      render: (_a: any, v: any) => {
+        const rows = v.rows as Array<Parameters<typeof mcpLine>[0] & { health: string; note: string }>
+        const head = `MCP 服务器体检 @ ${v.checkedAt}`
+        const logLine = v.log.available
+          ? `启动日志证据：${v.log.path}（尾部 ${v.log.bytesRead} 字节）`
+          : '启动日志证据：⚠ 读不到 ⇒ 健康档位判 unknown（不猜「在跑」）'
+        const cnt = Object.entries(v.counts as Record<string, number>)
+          .map(([k, n]) => `${k}=${n}`).join(' · ')
+        const lines = rows.length === 0
+          ? ['（本机没有注册任何 MCP 服务器）']
+          : rows.map((r) => (r.health === 'denied-runtime' ? `${mcpLine(r)}\n      ↳ ${r.note}` : mcpLine(r)))
+        return [{ type: 'text', text: [head, logLine, cnt, '', ...lines].join('\n') }]
+      },
+    },
+    async execute(args: { profile?: string; probeUpstream?: boolean; timeoutMs?: number }) {
+      const report = await runMcpCheck({
+        dshHome,
+        ...(args.profile === undefined ? {} : { profile: args.profile }),
+        ...(args.probeUpstream === undefined ? {} : { probeUpstream: args.probeUpstream }),
+        ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }),
+      })
+      const denied = report.rows.filter((r) => r.health === 'denied-runtime').map((r) => r.id)
+      logger.info(`MCP 体检：${report.rows.length} 个` +
+        (denied.length > 0 ? ` · ⚠ 运行时被拒 ${denied.join(',')}` : ''))
+      return report as any
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'plugin_inspect',
     description: '查看单个插件的深度档案（用途/工具/配置/挂载详情）。',
     parameters: { name: { type: 'string', required: true, description: '插件名' } },
@@ -563,7 +911,25 @@ export function apply(ctx: Context, config: Config): void {
       name: { type: 'string', required: true, description: '插件名（小写字母开头，仅 [a-z0-9-]）' },
       description: { type: 'string', description: '一句话用途（写入 description 与 README）' }
     },
-    output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, dir: { type: 'string' }, error: { type: 'string' } } }, render: (_a: any, v: any) => [{ type: 'text', text: v.ok ? '已创建: ' + v.dir : (v.error ?? '') }] },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          dir: { type: 'string' },
+          error: { type: 'string' },
+          warning: { type: 'string' },
+        },
+      },
+      render: (_a: any, v: any) => [{
+        type: 'text',
+        text: v.ok
+          ? ('已创建: ' + v.dir + (v.warning ? `
+⚠ ` + v.warning : ''))
+          : (v.error ?? ''),
+      }],
+    },
     async execute(args: { name: string; description?: string }) {
       return ops.create(args.name, args.description ?? '')
     },
@@ -593,6 +959,78 @@ export function apply(ctx: Context, config: Config): void {
     output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, note: { type: 'string' }, error: { type: 'string' } } }, render: (_a: any, v: any) => [{ type: 'text', text: v.ok ? (v.note ?? 'ok') : (v.error ?? '') }] },
     async execute(args: { name: string; profile?: string }, exec) {
       return ops.remove(args.name, args.profile || 'web', extractCaller(exec))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'plugin_purge',
+    description:
+      '彻底退役一个自研插件：**先出影响面，再执行**。'
+      + '为什么需要它：`plugin_unmount` 只清「挂载点 + profile 依赖」两处，实测（2026-10-03，14 个历史卸载样本）'
+      + '退役后 13/14 仍留残留——插件目录 + gitlink（1）、语义注册表条目（11）、技能/文档引用（8）。'
+      + '执行面：目录**移入** `${DSH_HOME}/archive/plugin-purge/`（不物理删除，可回退），每次留痕 `plugin-purge-trace.jsonl`。'
+      + '边界：语义注册表条目与文档/技能引用**只报告不改**（前者归 dsh-semantic-docs，后者改指需判断）；gitlink 只报告并给出命令。'
+      + '**默认干跑**：apply 缺省 false，只列影响面，零改动。',
+    parameters: {
+      name: { type: 'string', required: true, description: '插件名（自研，dsh- 前缀）' },
+      profile: { type: 'string', description: '目标 profile（默认 web）' },
+      apply: { type: 'boolean', description: '缺省 false = 干跑只出影响面；true = 执行（卸载 + 目录归档）' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          dryRun: { type: 'boolean', required: true },
+          name: { type: 'string', required: true },
+          profile: { type: 'string', required: true },
+          note: { type: 'string', required: true },
+          error: { type: 'string', required: true },
+          dirExists: { type: 'boolean', required: true },
+          dirBytes: { type: 'number', required: true },
+          archivedTo: { type: 'string', required: true },
+          gitlinkMode: { type: 'string', required: true },
+          semanticPresent: { type: 'boolean', required: true },
+          referenceCount: { type: 'number', required: true },
+          traceWritten: { type: 'boolean', required: true },
+        },
+      },
+      render: (_a: unknown, v: any) => {
+        // 渲染文案 = 纯层 purgeReportLines（工具与测试共用，防漂移）
+        return [{ type: 'text', text: purgeReportLines({
+          ok: v.ok === true,
+          dryRun: v.dryRun === true,
+          name: String(v.name ?? ''),
+          profile: String(v.profile ?? ''),
+          error: typeof v.error === 'string' ? v.error : undefined,
+          dirExists: v.dirExists === true,
+          dirBytes: typeof v.dirBytes === 'number' ? v.dirBytes : 0,
+          archivedTo: typeof v.archivedTo === 'string' ? v.archivedTo : undefined,
+          gitlinkMode: typeof v.gitlinkMode === 'string' ? v.gitlinkMode : undefined,
+          semanticPresent: v.semanticPresent === true,
+          referenceCount: typeof v.referenceCount === 'number' ? v.referenceCount : 0,
+          traceWritten: v.traceWritten === true,
+        }).join('\n') }]
+      },
+    },
+    async execute(args: { name: string; profile?: string; apply?: boolean }, exec) {
+      const r = await ops.purge(args.name, args.profile || 'web', { apply: args.apply === true }, extractCaller(exec))
+      return {
+        ok: r.ok,
+        dryRun: r.dryRun,
+        name: r.name,
+        profile: r.profile,
+        note: r.note ?? '',
+        error: r.error ?? '',
+        dirExists: r.dir.exists,
+        dirBytes: r.dir.bytes,
+        archivedTo: r.dir.archivedTo ?? '',
+        gitlinkMode: r.gitlink.mode ?? '',
+        semanticPresent: r.semantic.present,
+        referenceCount: r.references.reduce((n, x) => n + x.hits, 0),
+        traceWritten: r.traceWritten,
+      }
     },
   }))
 

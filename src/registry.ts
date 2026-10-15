@@ -93,10 +93,37 @@ export interface PatchRow {
 }
 
 /** 解析 cordis.patch.yml 文本 → 插件行列表（js-yaml；失败回退文本扫描）。 */
+/**
+ * 把 cordis 专有的 `!!js <表达式>` 标签中和为**占位标量**，使标准 YAML 解析器可读。
+ *
+ * 为什么需要（2026-10-03 修复 `plugin_inspect` config 恒为空的根因）：
+ * profile 的 patch 里 `!!js` 是**常态**而非例外（实测 `disabled: !!js process.platform !== 'win32'`），
+ * 标准解析器见它必抛 ⇒ `parsePatchRows` 的 YAML 分支**每次都失败**，永远走文本回退；
+ * 而回退只产出 `{id, name, disabled}`、**不含 config** ⇒ 所有 `if (row.config)` 分支恒假
+ * ⇒ `plugin_inspect` 的 config 永为 `{}`（该缺口自 2026-09-23 记录起 10 天未修，
+ * 致 2026-10-03 一次误判 + 12 次无效排查）。
+ *
+ * **副作用与安全性**：中和后 `disabled` 变成普通字符串 ⇒ 其后的 `=== true` 判假；
+ * 而原回退分支里 `disabled` 是 `undefined` ⇒ **同样判假**。⇒ 两条路径对这一字段的判定一致，
+ * 不改变 mounted/disabled 语义（回归由 `tests/patch-js-tag.test.mjs` 锁住）。
+ *
+ * @param text - 原始 patch 文本。
+ * @returns 标签被替换为带引号占位标量的文本（表达式内容保留在值里，便于排查）。
+ */
+export function neutralizeJsTags(text: string): string {
+  return text.replace(/!!js[ \t]+([^\n]*)/g, (_m, expr: string) => {
+    // 单引号标量：内部单引号按 YAML 规则双写
+    return "'__JS__ " + expr.trim().replace(/'/g, "''") + "'"
+  })
+}
+
 export function parsePatchRows(patchText: string): PatchRow[] {
   const rows: PatchRow[] = []
   try {
-    const doc = yaml.load(patchText)
+    // 先中和 `!!js` 再解析（见 neutralizeJsTags 的说明）——这一步是整个 config 链的前提。
+    // 变异测试结论（2026-10-03）：摘掉本行 ⇒ tests/patch-js-tag.test.mjs 的两个用例立刻转红
+    //（「含 !!js 的 patch 必须读出 config」与「两条路径结果一致」）⇒ 判据有区分力。
+    const doc = yaml.load(neutralizeJsTags(patchText))
     if (Array.isArray(doc)) {
       for (const entry of doc) {
         if (!entry || typeof entry !== 'object') continue

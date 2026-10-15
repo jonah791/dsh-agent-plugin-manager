@@ -265,6 +265,10 @@ export function preflight(opts: {
     // 假 FAIL 的代价不小：它会拦住合法重启，并诱使人「重跑碰运气」（违反 5.9 的探测纪律）。
     // 故提到 90000ms（实测 2.25x 余量）；watch profile 的 sentinel 预检本就配 60000ms，
     // 这里取更宽值以覆盖组合继续增长的空间。此为纯放宽：预检项本身不变，不会降低检出力。
+    // 注（2026-09-26）：曾出现「trialRun 静默 ≈89s ⇒ 撞 trialProgressWindowMs(15000) 判死」的
+    // 假红。真因不在窗口而在我的插件（dsh-agent-toolface 一次 apply 里重复调 5 次 tools.schemas()，
+    // 宿主每次都要对 236 个工具深克隆 parameters ≈8s/次）。根因修掉后冷启 57s → 2.6s，
+    // 窗口保持核心默认值以维持 fail-fast 能力（任务 t-bec5b8b7）。
     preflightReadyMs: opts.preflightReadyMs ?? 90000,
     preflightGraceMs: opts.preflightGraceMs ?? 10000,
     probeExistingFirst: opts.probeExistingFirst ?? false,

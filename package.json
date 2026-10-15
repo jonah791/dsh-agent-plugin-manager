@@ -1,68 +1,67 @@
 {
-    "name":  "dsh-agent-plugin-manager",
-    "version":  "0.1.5",
-    "description":  "插件管理器：插件档案库（清单/用途/工具/配置认知，含 9 工具）+ 生命周期管理（创建/挂载/启停/卸载/配置）+ **档案漂移审计**（plugin_audit：自述 vs 档案事实），host 工具面 + 官方设置页「插件管理」tab。",
-    "type":  "module",
-    "main":  "lib/index.js",
-    "types":  "lib/types/index.d.ts",
-    "exports":  {
-                    ".":  {
-                              "types":  "./lib/types/index.d.ts",
-                              "default":  "./lib/index.js"
-                          },
-                    "./package.json":  "./package.json",
-                    "./client":  {
-                                     "types":  "./lib/types/client/index.d.ts",
-                                     "default":  "./lib/client.js"
-                                 }
-                },
+    "name": "dsh-agent-plugin-manager",
+    "version": "0.1.5",
+    "description": "插件管理器：插件档案库（清单/用途/工具/配置认知，含 9 工具）+ 生命周期管理（创建/挂载/启停/卸载/配置）+ **档案漂移审计**（plugin_audit：自述 vs 档案事实），host 工具面 + 官方设置页「插件管理」tab。",
+    "type": "module",
+    "main": "lib/index.js",
+    "types": "lib/types/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./lib/types/index.d.ts",
+            "default": "./lib/index.js"
+        },
+        "./package.json": "./package.json",
+        "./client": {
+            "types": "./lib/types/client/index.d.ts",
+            "default": "./lib/client.js"
+        }
+    },
     "files": [
-                  "lib",
-                  "README.md",
-                  "dsh-plugin.json"
+        "lib",
+        "README.md",
+        "dsh-plugin.json"
     ],
-    "license":  "MIT",
-    "dependencies":  {
-                         "js-yaml":  "^4.1.0",
-                         "dsh-agent-preflight":  "link:E:/alice/self-plugins/dsh-agent-preflight"
-                     },
-    "peerDependencies":  {
-                             "@deepseek-ai/cordis":  "^4.0.1",
-                             "@deepseek-ai/schemastery":  "^3.18.1-rc.1",
-                             "@deepseek-ai/dsh-tools":  "^0.1.0-rc.6",
-                             "@deepseek-ai/dsh-typert-protocol":  "^0.1.0-rc.6",
-                             "@deepseek-ai/dsh-client-runtime":  "^0.1.0-rc.6",
-                             "@deepseek-ai/dsh-client-ui-settings":  "^0.1.0-rc.6",
-                             "@deepseek-ai/dsh-client-ui-slots":  "^0.1.0-rc.6",
-                             "@deepseek-ai/dsh-client-locale":  "^0.1.0-rc.6",
-                             "react":  "^18.2.0",
-                             "zod":  "^4.4.3"
-                         },
-    "devDependencies":  {
-                            "@types/node":  "^22.0.0",
-                            "@types/js-yaml":  "^4.0.9",
-                            "@types/react":  "~18.3.1",
-                            "tsdown":  "0.22.2",
-                            "typescript":  "^5.9.3"
-                        },
-    "allowScripts":  [
-
-                     ],
-    "scripts":  {
-                    "build":  "tsc -p tsconfig.json",
-                    "typecheck":  "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
-                    "test": "node --test \"tests/*.test.mjs\" \"test/*.test.mjs\""
-                },
-    "dsh":  {
-                "client":  {
-                               "inject":  [
-                                              "@deepseek-ai/dsh-client-runtime",
-                                              "@deepseek-ai/dsh-api-remotes",
-                                              "@deepseek-ai/dsh-client-ui-settings",
-                                              "@deepseek-ai/dsh-client-locale",
-                                              "@deepseek-ai/dsh-client-ui-slots"
-                                          ],
-                               "platform":  "web"
-                           }
-            }
+    "license": "MIT",
+    "dependencies": {
+        "js-yaml": "^4.1.0",
+        "dsh-agent-preflight": "link:E:/alice/self-plugins/dsh-agent-preflight"
+    },
+    "peerDependencies": {
+        "@deepseek-ai/cordis": "^4.0.1",
+        "@deepseek-ai/schemastery": "^3.18.1-rc.1",
+        "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6",
+        "@deepseek-ai/dsh-typert-protocol": ">=0.1.0-rc.6",
+        "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.6",
+        "@deepseek-ai/dsh-client-ui-settings": ">=0.1.0-rc.6",
+        "@deepseek-ai/dsh-client-ui-slots": ">=0.1.0-rc.6",
+        "@deepseek-ai/dsh-client-locale": ">=0.1.0-rc.6",
+        "react": "^18.2.0",
+        "zod": "^4.4.3"
+    },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "@types/js-yaml": "^4.0.9",
+        "@types/react": "~18.3.1",
+        "tsdown": "0.22.2",
+        "typescript": "^5.9.3"
+    },
+    "allowScripts": [],
+    "scripts": {
+        "prepare": "tsc -p tsconfig.json",
+        "build": "tsc -p tsconfig.json",
+        "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+        "test": "node --test \"tests/*.test.mjs\" \"test/*.test.mjs\""
+    },
+    "dsh": {
+        "client": {
+            "inject": [
+                "@deepseek-ai/dsh-client-runtime",
+                "@deepseek-ai/dsh-api-remotes",
+                "@deepseek-ai/dsh-client-ui-settings",
+                "@deepseek-ai/dsh-client-locale",
+                "@deepseek-ai/dsh-client-ui-slots"
+            ],
+            "platform": "web"
+        }
+    }
 }

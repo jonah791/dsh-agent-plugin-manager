@@ -16,9 +16,7 @@
 
 ## 1 · 定位与反定位
 
-**定位**：DSH 的**插件档案库 + 生命周期操作面**——把「有哪些插件、什么来源、挂到哪个 profile、装了什么工具、配置是什么」变成一条命令可查（`plugin_list` / `plugin_inspect`），
-并把「创建 / 挂载 / 启停 / 卸载 / 改配置」做成**带备份与回滚的闭环操作**（写 patch → 装依赖 → 试运行预检 → 写哨兵 → watch 重启）。
-另含两件与「重启」直接相关的职责：`preflight_check`（预检 + 落盘「本 web 进程内调用过」证据）与 `daemon_restart`（重启闸门 + 写哨兵）。
+**定位**：DSH 的**插件档案库 + 生命周期操作面**——把「有哪些插件、什么来源、挂到哪个 profile、装了什么工具、配置是什么」变成一条命令可查（`plugin_list` / `plugin_inspect`）， 并把「创建 / 挂载 / 启停 / 卸载 / 改配置」做成**带备份与回滚的闭环操作**（写 patch → 装依赖 → 试运行预检 → 写哨兵 → watch 重启）。 另含两件与「重启」直接相关的职责：`preflight_check`（预检 + 落盘「本 web 进程内调用过」证据）与 `daemon_restart`（重启闸门 + 写哨兵）。
 
 **反定位（本文不管什么）**：
 - 不管**进程**生命周期（kill/spawn/保活）——那属于 `dsh-agent-guardian`（守护）与 `dsh-agent-sentinel`（哨兵）；本插件只**写哨兵**请求重启
@@ -93,15 +91,18 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
 | `installTimeoutMs` | `600000` | `pnpm install` 超时 | 使用 |
 | `registryFile` | `''` | —— | **死配置**：声明 + 默认值存在，全仓库无读取点（`grep registryFile src/` 仅命中声明处） |
 
-### 4.2 工具面（11 个，`src/index.ts`；行号为 2026-09-22 复核时刻，漂移时以工具名为准）
+### 4.2 工具面（14 个，`src/index.ts`；行号为 2026-09-22 复核时刻，漂移时以工具名为准）
 | 工具 | 注册行 | 作用 | 关键裁决 |
 |------|-------|------|---------|
 | `plugin_list` | L461 | 档案列表（按 `source`/`status` 过滤，分组渲染） | 状态经 loader 对齐（I3）；**第三方档覆盖四种安装形态**（见 §4.3「第三方盘点」行，2026-09-14 修）；`config` 经 `redactConfig`（I7） |
+| `plugin_update_check` | 2026-10-13 新增 | **第三方插件上游更新检查**（只读·**只报告**）：枚举已装第三方 → 解析上游（spec 的 github 短写 / `package.json` `repository` / `homepage`）→ 查上游最新版（npm `latest` → GitHub release → GitHub tag）→ 版本比较 | **六档互不掩盖**：`update-available` / `up-to-date` / `not-comparable` / `no-upstream` / `fetch-failed` / `skipped`——**查询失败绝不读成「没更新」**（最危险的一格）；**`not-comparable` 独立成档**：核心三段相同但 prerelease 标识不同 ⇒ **拒绝排序**（`1.0.0-beta.5` vs `1.0.0-beta.10` 字符串比较与朴素数字比较**都会给反的答案**）；**不自动升级**（第三方升级须走 §5.23「读上游 CHANGELOG → 换 pin → 重装 → 重启 → 黑盒验收」，那是主体的决策）；覆盖度对账：`coverage.missing` 必须为空，漏查即显式列出 |
+| `plugin_mcp_check` | 2026-10-13 新增 | **MCP 服务器专项体检**（只读·**只报告**）：扫各 profile 的 `@deepseek-ai/dsh-mcp-client` 行（**它们不在 profile 依赖里**——住在 `cordis.patch.yml` 的 `config.args`，故 `scanThirdParty` 结构上看不见）→ 解析在跑的包与版本 → 健康判定 → 可选查上游 | **四档健康互不掩盖**：`active` / `disabled-in-patch`（配置有意停用）/ **`denied-runtime`**（★ 配置启用但被 DSH 兼容性预检静默停用——`compatibility-preflight.ts` 只往 **stderr** 打一行，不进模型上下文）/ `unknown`（**读不到日志 ⇒ 不判 active**）。另标出**浮动版本**（`@latest`/无版本 ⇒ 配置里不存在确定版本，每次启动可能换）；**非包运行器命令 ⇒ `pkg: null`，不伪造包名去查上游** |
 | `plugin_inspect` | L478 | 单插件深度档案 | 不存在 → `ok:false`（第三方档命中后不再误报「不存在」）；`config` 经 `redactConfig`（I7，2026-09-17 修） |
 | `plugin_audit` | L489 | 档案漂移审计（只读）：自述工具数 ≠ 清单长度 / 声称有工具却空清单 / 无用途描述 / 挂载未构建 / 挂载零工具未声称 | 默认只看自研（官方 bundle 不背我的 `purpose` 约定 ⇒ 不参与）；**看不见运行时真实工具面**（2026-09-17 新增，I8） |
 | `plugin_create` | L512 | 生成脚手架（`package.json`/`tsconfig.json`/`src/index.ts`/`README.md`） | 目录已存在 / 名字非法 → `ok:false` |
 | `plugin_mount` | L525 | link 依赖 + install + patch insert + 预检 + 哨兵 | 已挂载 / 官方 bundle / profile 不存在 → 拒绝；**第三方 → 显式拒绝并指路**（`thirdPartyRefusal`，§5.23） |
 | `plugin_unmount` | L539 | patch 移除 + 依赖移除 + install + 预检 + 哨兵 | 未挂载 → 拒绝；数据目录保留（I5）；**第三方 → 显式拒绝**（第三方卸载走 `dsh plugin remove`） |
+| `plugin_purge` | 2026-10-03 新增 | **彻底退役**（两段式）：默认 **dry-run**，只出影响面；`apply=true` 才执行 = ① 若仍挂载先走 `unmount`（复用其预检与回滚） ② 插件目录 `renameSync` 移入 `<DSH_HOME>/archive/plugin-purge/<name>-<ts>/`（**不物理删除** ⇒ 可回退） ③ 留痕 `plugin-purge-trace.jsonl` | **为什么需要**：`unmount` 只清「挂载点 + profile 依赖」两处，实测 14 个历史卸载样本中 **13/14 退役后仍有残留**（目录+gitlink 1 / 语义注册表条目 11 / 技能引用 8，见 `docs/reports/plugin-value-audit-20261003.md`）。**边界（只报告不改）**：gitlink 给出 `git rm --cached` 命令；语义条目归 `dsh-semantic-docs`（registry 的 owner）；文档/技能引用改指**需判断**，不能自动化。第三方 → 拒绝 |
 | `plugin_start` / `plugin_stop` | 循环注册 L551–553（`name` 由 `toolName` 计算） | `disabled` 切换 + 预检 + 哨兵 | 已是目标状态 → 拒绝；**第三方 → 显式拒绝**（bundle 形态无 patch 行可控） |
 | `plugin_configure` | L567 | patch `config` **整体替换** + 预检 + 哨兵 | 未挂载 → 拒绝；**第三方 → 显式拒绝**（其配置由 profile 依赖与包自身约定决定） |
 | `preflight_check` | L581 | 试运行预检 + 落盘调用记录 | `profile==='web'` 且无未验证构建 → 短路（`probeExistingFirst=true`） |
@@ -161,9 +162,7 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
 3. **行为可答**：`plugin_list` 返回三条来源分组（自研/官方/非官方）；`preflight_check {mode:'quick'}` 返回 `pass` 且 `<DSH_HOME>/.preflight-invoked.json` 的 `atMs` **前进**（这是「我的调用落了盘」的物证）。
 4. **闸门可证伪**：未预检时调 `daemon_restart` → 必须被拒绝，且 `.plugin-manager-events.log` 出现 `daemon_restart 门控证据：… 结论=拒绝` 行。
 
-**回退**：`git revert` 本仓库最近一次提交（或 `git checkout -- src/` 丢弃未提交改动）→ `pnpm build` → 预检 → 写哨兵/`daemon_restart` 重启 web。
-配置回退：用 `plugin_configure dsh-agent-plugin-manager` 还原上一组 config（patch 整体替换会留 `.bak-<时间戳>`，必要时把 `.bak-*` 复制回 `cordis.patch.yml`）。
-单次操作回退：任何被拒/失败的组合变更都已被自动回滚；手工回退用最新的 `cordis.patch.yml.bak-*` + `package.json.bak-*`。
+**回退**：`git revert` 本仓库最近一次提交（或 `git checkout -- src/` 丢弃未提交改动）→ `pnpm build` → 预检 → 写哨兵/`daemon_restart` 重启 web。 配置回退：用 `plugin_configure dsh-agent-plugin-manager` 还原上一组 config（patch 整体替换会留 `.bak-<时间戳>`，必要时把 `.bak-*` 复制回 `cordis.patch.yml`）。 单次操作回退：任何被拒/失败的组合变更都已被自动回滚；手工回退用最新的 `cordis.patch.yml.bak-*` + `package.json.bak-*`。
 
 ## 7 · 可证伪验收清单
 
@@ -178,9 +177,9 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
 | A7 | 事件日志吞错不阻断（观测不反噬主流程） | `grep -n "appendLineSafe\|catch" src/event-log.ts`（返回 bool、不抛）+ `.plugin-manager-events.log` 存在且末行格式 `[ISO] 消息` | 待验收 |
 | A8 | 卸载保留插件数据目录 | `plugin_unmount` 后 `self-plugins/<name>/` 仍存在，仅 patch 行与 `link:` 依赖消失 | 待验收 |
 | A9 | client 槽位已撤除（GUI 单一入口 = 面板宿主） | `grep -n "session.header.actions" src/client/index.ts` 无注册语句（仅注释） | 已实测（独立复核：仅 L42 注释命中） |
-| A10 | **第三方四种安装形态全部可盘点**（git pin / tarball / registry / `file:`）；`link:` 到 self-plugins 的自研**不混入**；bundle 形态标 `bundle=true` 且判 mounted | `node --test tests/registry-deps.test.mjs`（夹具：git-pin 带 `dsh.profile.bundles` ⇒ mounted；registry 未安装 ⇒ unmounted 且版本留空；自研/官方不入第三方档） | 已证（单测；线上见 A11） |
-| A11 | 线上 `plugin_list --source third-party` 能看到 bundle 形态的第三方（此前为空） | 重启后调 `plugin_list {source:'third-party'}` → 含 `dsh-x-opencode-session`（bundle=true、spec 带 commit pin） | **已证（2026-09-14 15:47:57 重启后实测）**：`▸ 非官方（第三方）（1）• dsh-x-opencode-session 0.1.0 [mounted]` + `挂载: web` + `bundle: true` + `来源: github:Coco-king/dsh-x-opencode-session#2e7ce82…`；修前同一调用返回空列表 |
-| A12 | **第三方不得走自研生命周期**：`plugin_mount`/`unmount`/`start`/`stop`/`configure` 对第三方一律拒绝，且文案指名来源与两条指路（改 pin / `dsh plugin`） | `node --test tests/third-party-refusal.test.mjs`（4 条：文案含名/pin/profile/两条命令/§5.23 依据；bundle=false 不编造形态；五个动作动词各异） | **已证（2026-09-14 16:42:34 重启后线上实测）**：对 `dsh-x-opencode-session` 调 `plugin_mount` → 返回拒绝文案（含 pin `#2e7ce82…`、bundle 说明、两条指路）；**零副作用已核**：`package.json` sha256 `6AF91603ED0EA991`、`cordis.patch.yml` sha256 `34EFC6E767F70FE4` 前后逐字相同、mtime 未变、哨兵未写 |
+| A10 | **第三方四种安装形态全部可盘点**（git pin / tarball / registry / `file:`）；`link:` 到 self-plugins 的自研**不混入**；bundle 形态标 `bundle=true` 且判 mounted | `node --test tests/registry-deps.test.mjs`（夹具：git-pin 带 `dsh.profile.bundles` ⇒ mounted；registry 未安装 ⇒ unmounted 且版本留空；自研/官方不入第三方档） | ✔ 已实测（单测；线上见 A11） |
+| A11 | 线上 `plugin_list --source third-party` 能看到 bundle 形态的第三方（此前为空） | 重启后调 `plugin_list {source:'third-party'}` → 含 `dsh-x-opencode-session`（bundle=true、spec 带 commit pin） | **✔ 已实测（2026-09-14 15:47:57 重启后实测）**：`▸ 非官方（第三方）（1）• dsh-x-opencode-session 0.1.0 [mounted]` + `挂载: web` + `bundle: true` + `来源: github:Coco-king/dsh-x-opencode-session#2e7ce82…`；修前同一调用返回空列表 |
+| A12 | **第三方不得走自研生命周期**：`plugin_mount`/`unmount`/`start`/`stop`/`configure` 对第三方一律拒绝，且文案指名来源与两条指路（改 pin / `dsh plugin`） | `node --test tests/third-party-refusal.test.mjs`（4 条：文案含名/pin/profile/两条命令/§5.23 依据；bundle=false 不编造形态；五个动作动词各异） | **✔ 已实测（2026-09-14 16:42:34 重启后线上实测）**：对 `dsh-x-opencode-session` 调 `plugin_mount` → 返回拒绝文案（含 pin `#2e7ce82…`、bundle 说明、两条指路）；**零副作用已核**：`package.json` sha256 `6AF91603ED0EA991`、`cordis.patch.yml` sha256 `34EFC6E767F70FE4` 前后逐字相同、mtime 未变、哨兵未写 |
 | A13 | **工具面不拉凭据**：`plugin_inspect` 输出的 `config` 中，键名命中秘密模式者值恒为 `[redacted]`，非密键名原样保留 | `node --test tests/redact-config.test.mjs`（7 条；含尸体测试：输出不得含原值任何形态、普通键名不得误伤） | 已实测（2026-09-22 复核实测：全套 78/78 绿；事故形态为 `plugin_inspect(dsh-agent-guardian)` 曾把 telegram bot token 渲进工具输出） |
 | A14 | **漂移审计只读且默认只看自研**：自述工具数 ≠ 档案清单长度 / 声称有工具却空清单 / 无用途描述 / 挂载未构建 / 挂载零工具未声称 ⇒ 报；干净档案不报 | `node --test tests/drift.test.mjs`（10 条；含两条尸体测试：一致不报警、抠不到数字不猜） | 已实测（2026-09-22 复核实测：全套 78/78 绿） |
 
@@ -221,6 +220,52 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
   - **中途纠错（假防线级，必须记）**：v1 只用 `ctx.sessions.list()`，真机第一次调用即露馅——日志原文「候选会话 2 · 命中 0（放行）」，而当时**确有一个分身正在跑**。⇒ 内存会话表**不含在飞的子代理**，这道防线**永远放行**。改用文件系统真源 `<DSH_HOME>/sessions/<工作区组>/<会话id>/`，以目录 mtime（最后写入 ≈ 还在跑）判在飞，并用本仓既有 id 约定区分（子代理 = **裸 uuid**；用户会话 = `session-` 前缀，见 `pickActiveSessionId` 测例）⇒ 精确、不误伤并行实例，且**无状态**（跑完自然滑出窗口，无需清理逻辑）。
   - **已知局限（未解，见 U9）**：时间窗判据区分不了「在跑」与「刚死不到一个窗口」——实测把已被上次重启斩掉的会话（366s 前）也列为在飞。代价：重启后一个窗口内无法再重启（除非 `force`）；可读作「防重启循环的护栏」，但必须明说。
   - 教训：**「有防线」≠「防线在拦」**——判据必须能被**已知坏样本**证明（§5.9·2）。本次是靠「故意在有分身时调一次」当场抓到假防线；若只跑单测（纯函数全绿），我会一路以为自己防住了。
+
+- **2026-10-03 新增 `plugin_purge` + 修好 `config` 恒为空（10 天缺口）= 任务 `t-e35c5ef6` 结清**
+  - **① 为什么加 `plugin_purge`**：主人点名「你有**修改跟增加**的能力，但**删除能力很弱**」。实测 14 个历史卸载样本 ⇒ **13/14 退役后仍有残留**（目录+gitlink 1 / 语义注册表条目 11 / 技能引用 8，见 `docs/reports/plugin-value-audit-20261003.md`）——`unmount` 的设计只清「挂载点 + profile 依赖」两处。**新工具两段式**：默认 **dry-run** 出影响面；`apply=true` 才执行「若仍挂载先走 `unmount`（复用其预检与回滚）→ 目录 `renameSync` 移入 `<DSH_HOME>/archive/plugin-purge/<name>-<ts>/`（**不物理删除** ⇒ 可回退）→ 留痕 `plugin-purge-trace.jsonl`」。**边界显式**：gitlink 只给 `git rm --cached` 命令（改主仓索引属重操作）；语义注册表条目归 `dsh-semantic-docs`（它是 registry 的 owner）；文档/技能引用**只报告不改**（改指需判断，不能自动化）。
+  - **② 修好 `config` 恒为空**（这条缺口已存在 10 天，自 2026-09-23 记录起）：根因链——profile patch 含 cordis 专有 `!!js <表达式>` 标签 ⇒ 标准 YAML 解析器**每次都抛** ⇒ `parsePatchRows` 永远走文本回退 ⇒ 而回退只 push `{id, name, disabled}`、**不含 config** ⇒ 所有 `if (row.config)` 分支恒假 ⇒ `plugin_inspect` 的 config 永为 `{}`。**危害实例**：2026-10-03 我据这个空 config 误判「runsDir 路径矛盾」，投入 12+ 次无效排查（真因是配置覆盖了默认值）。**修法**：`neutralizeJsTags`（把 `!!js <expr>` 中和为带引号的占位标量）⇒ YAML 分支可成功 ⇒ config 回来了。**副作用已分析并回归**：中和后 `disabled` 变成字符串 ⇒ `=== true` 判假；而回退路径里它本是 `undefined` ⇒ **同样判假** ⇒ mounted/disabled 语义不变。**实测（真实 patch，无需重启）**：解析 61 行、**36 行带 config**（修前 0 行），`dsh-agent-self-rewrite` 的 `maxBytes: 64800` 与 `evolveDataDir: E:/alice/.evolve` 均正确读出。
+  - **③ 判据区分力（变异测试）**：新增 `tests/patch-js-tag.test.mjs`（6 例）；摘掉 `neutralizeJsTags` ⇒ 「尸体样本」与「双路径一致」两例立刻转红，还原后 **89/89 绿**。
+  - 教训：**「有回退分支」会把主路径的失败变成静默**——`!!js` 是**常态**而非例外，于是主路径 100% 失败、回退 100% 接管，而回退**缺一半字段**却 10 天无人发现（**因为没有任何测试覆盖回退**）。⇒ 与 09-22 那条同源，补一句：**「有防线」≠「防线在拦」**，且**「有回退」≠「回退覆盖了主路径的语义」**。
+
+- **2026-10-13 新增 `plugin_update_check`：第三方上游更新检查（补 §5.23 最后一格盲区）**
+  - **起因（主人）**：「实现一个检查第三方插件上游更新的功能」——要求识别已装插件及版本、获取上游最新版本、版本对比判断更新，并处理网络失败 / 版本格式不一致 / 未配置上游源三类异常。
+  - **① 为什么不是从零造**：`scanThirdParty`（2026-09-14 修）**已经**能枚举四种安装形态并给出 `version` 与 `spec`（含 pin）——缺的只是「上游是谁」与「怎么比」。故复用同一扫描器（**同一事实两处实现必然漂移**），只补 `resolveUpstream` + `compareVersions`。
+  - **② 上游解析（三档，命中即返回并写明依据）**：profile spec 的 github 短写/git URL → `package.json` 的 `repository`（实测本机 5 例中 4 例走这档）→ `homepage`。实测覆盖 `dsh-connect-trae` / `dsh-nuphus-mcp` / `dsh-ops` / `dsh-workbuddy-hub` / `dsh-x-opencode-session`（后者 `repository` 为 `null`，靠 spec 的 `github:Coco-king/…#2e7ce82` 命中）。
+  - **③ 版本比较的取严判据（本功能最要害的一格）**：**核心三段相同但 prerelease 标识不同 ⇒ 判 `not-comparable`，拒绝排序**。反例 `1.0.0-beta.5` vs `1.0.0-beta.10`：字符串比较给 `beta.10 < beta.5`（错），朴素数字比较给 `10 > 5`（也错）——semver 的 prerelease 比较是分段标识符规则，而多数上游并不保证可解析 semver。**宁可不判，也不给可能反向的结论**（会给「建议升级」这种方向性误导）。另：`1.0` 这类非三段形态一律 `not-comparable`（补位假设会让判定依赖猜测）；`2024.10.13` 这类 CalVer **可**按数字比较（写判据时第一版误判为不可比，当场纠正）。
+  - **④ 六档互不掩盖**（§5.30 语义精确性）：`update-available` / `up-to-date` / `not-comparable` / `no-upstream` / `fetch-failed` / `skipped`。**查询失败绝不塌缩成「已最新」**——那是本功能最危险的失效形态（网络断 ⇒ 报「全部最新」⇒ 主体以为无需动作）。
+  - **⑤ 只报告，不自动升级**（§5.23 的直接推论）：第三方升级须走「读上游 CHANGELOG → 换 pin → 重装 → 重启 → 黑盒验收」，其中「换 pin 到哪个版本」是**主体的判断**，不是自动化的动作。本工具不写任何配置、不动任何 pin。
+  - **⑥ 覆盖度对账**：`coverage.missing` 必须为空，漏查的插件显式列出——防「截断读数当完整证据」（我 2026-10 成本审计的同族失误：把截断读数当完整证据）。
+  - **⑦ 当场抓出的真缺陷（记在案）**：写测试时 `compareVersions` 的 prerelease 两分支**符号写反**（本地正式版 vs 上游预发布被判成「有更新」）⇒ 会**建议把正式版降级到旧预发布版**。由 `tests/update-check.test.mjs` 当场抓出并修正——**这正是「判据要先立」的价值：该 bug 在真实网络下极难自然命中**。
+  - **判据**：`tests/update-check.test.mjs`（16 条，纯函数：比较/上游解析/六档分档/覆盖度，含 5 条尸体）+ `tests/update-io.test.mjs`（10 条，IO 层：注入假 fetch 构造 npm 404 回退、全端点失败、抛异常、响应形状不符、离线不得报 up-to-date、行内不得出现本地绝对路径）⇒ **全量 143/143 绿**（原 117 + 新 26）。
+  - **真实端到端读数（2026-10-13 19:30，非注入）**：5/5 覆盖、零漏查、2.7 秒；命中 1 个真实更新（`dsh-ops` 本地 0.2.6 → 上游 0.2.9）；`dsh-x-opencode-session` 的 `v0.1.0` 前缀归一化生效。
+
+- **2026-10-13 新增 `plugin_mcp_check`：MCP 服务器专项支持与兼容性处理**
+  - **起因（主人）**：「考虑对 MCP 插件的特殊支持与兼容性处理」。侦查后发现这不是预防性需求——**本机已有一处四天的静默失效**。
+  - **① 为什么 MCP 必须单独一档（结构原因，非偏好）**：MCP 服务器**不在 profile 的 `dependencies` 里**——它们住在 `cordis.patch.yml` 的 `@deepseek-ai/dsh-mcp-client` 行的 `config.args`（`npx -y <pkg>@<ver>` 形态）。⇒ 上一轮做的 `scanThirdParty`（扫 `package.json` 依赖）**结构上看不见它们**：本机实测 `plugin_list --source third-party` 报 5 个插件、**不含 `mcp-playwright`**。
+  - **② 实测事故（本功能第一跑即抓出）**：`mcp-playwright`（主人 2026-10-11 授权，连 Edge 9222 用他的登录态）**从装上起从未运行过**。根因链：`@deepseek-ai/dsh-mcp-client` 的受管副本版本是 **0.0.1-rc.1**（真实 npm 副本，非 link），peer 要求 `^0.0.1-rc.1`；而运行时是 **0.2.1-alpha.2** ⇒ DSH 的兼容性预检（`packages/boot/app-boot/src/compatibility-preflight.ts:114-118` 的 `deny()`）在组合装配时把该行**改写为 `disabled: true`**，只往 **stderr** 打一行 `disabling profile plugin row "mcp-playwright": …incompatible with dsh 0.2.1-alpha.2`（`.watch-web.log` 里**同型 69 次**，每次启动拦一次）。**那行不进模型上下文** ⇒ 「配置里写着」与「实际从未运行」之间没有任何可见面。
+  - **③ 为什么是副本而不是 link（对照取证）**：同目录 `node_modules/@deepseek-ai/` 下，官方包有的是 `SymbolicLink`（如 `dsh-experimental-agent-team-profile` → checkout），**只有 `dsh-mcp-client` 是真实旧副本**。checkout 真源（`packages/mcp/mcp-client`）版本 0.2.1-alpha.2、peer 用 `workspace:*`（会正确解析到运行时）、**且已构建**（`lib/index.js` 在、自己的 `node_modules` 里有 `@modelcontextprotocol/*`）⇒ **link 修复路径在结构上可行**。
+  - **④ 三档风险面（MCP 独有）**：浮点版本（`@latest` ⇒ 配置里不存在确定版本，每次启动可能换工具面）/ 工具面膨胀（一个 MCP 可贡献上百工具且带 in+out schema——实测 REA 170 工具 ≈ 552K token）/ 静默停用（上述 ②）。
+  - **⑤ 判据设计的两处取严**：**读不到启动日志 ⇒ `unknown`，绝不判 `active`**（「配置启用」≠「真的在跑」，本次事故正是这个形状）；**非包运行器命令（绝对路径脚本）⇒ `pkg: null`，不伪造包名去查上游**（否则会给出关于**别的包**的版本读数）。日志只读**尾部 512 KB**（本机 `.watch-web.log` 1.7 MB 且持续增长；「当前是否被停用」只取决于最近一次启动）。
+  - **⑥ 边界（明确不越界）**：本工具**只报告**，不写任何配置、不动任何 pin、不改兼容性豁免单。修复路径有两条且都是主体的决策：**(a)** 把 profile 依赖从 npm 副本换成 link 到 checkout 真源（消除版本失配的根因，形态同我 60+ 自研插件）；**(b)** 用官方 `dsh plugin --profile <p> allow-version <pkg>@<ver> --dsh-version <exact> --accept-risk` 给旧副本开精确版本豁免（`packages/boot/app-boot/src/profile-compatibility.ts:113` 的 `setProfileVersionExemption`；本机 `profiles/web/compatibility.json` 已有先例 `dsh-ops@0.2.6`）。**(b) 是「知情接受风险」——0.0.1-rc.1 的 mcp-client 与 0.2.1-alpha.2 运行时 API 可能真的不兼容，官方那句 "may cause crashes or data loss" 不是套话。**
+  - **判据**：`tests/mcp-check.test.mjs`（17 条纯函数：命令解析/行提取/停用证据提取/四档健康/渲染，含 7 条尸体）+ `tests/mcp-io.test.mjs`（12 条 IO：日志读不到判 unknown、大日志只读尾部、停用证据命中与不误报、离线模式、计数一致）⇒ **全量 172/172 绿**（原 143 + 新 29）。
+  - **真实端到端读数（2026-10-13 19:39，非注入）**：`counts = {active:0, disabled-in-patch:0, denied-runtime:1, unknown:0}`；命中 `mcp-playwright`，`pkg=@playwright/mcp`、`floating=true`、上游 `latest=0.0.83`、`verdict=not-comparable`（浮动版无本地版本可比），`note` 完整带出 `incompatible with dsh 0.2.1-alpha.2` 原文。
+
+- **2026-10-13 修 `plugin_mcp_check` 的时刻口径缺陷（由本工具自身一次误报抓出）**
+  - **现场**：`mcp-playwright` 的静默失效修好后（profile 层加直接 link 依赖 + 官方精确版本豁免），工具**仍报 `denied-runtime`**；而日志里最新一条停用记录是**修复前**那轮的（11:54:37Z），本次启动（12:03:42Z）之后**零停用记录**。
+  - **根因**：`runtimeDenials` 取「文件里最后一次出现」——而启动日志**跨多轮启动累积**（本机同一行同型记录 69 次）⇒ **历史轮次的记录被当成当前状态**。这是 §5.9 规则 6 的同族错误：读数没有自带范围。
+  - **修法**：新增 `sinceMs` 下界（缺省 = 本进程启动时刻，`processStartMs(now, uptime)`），只采纳**该时刻之后**的日志行；`McpCheckReport.log.sinceMs` 一并投影，做到**口径与读数同体**。
+  - **取严取向**：**无时间戳的行仍计入**（无法归属 ⇒ 宁可误报也不静默漏报）——本工具存在的唯一理由是让静默失效可见，漏报代价大于误报。
+  - **判据**：新增 6 条（3 纯函数 + 3 IO），其中一条**把缺陷形态本身钉住**（同一份日志不设界 ⇒ 报 denied；设界 ⇒ 报 active），防回退 ⇒ **全量 178/178 绿**。
+  - 教训：**「最新的那条」≠「当前那轮的那条」**——任何跨轮累积的日志，读数都必须带时刻下界；且**这个缺陷是靠"用自己刚造的工具"才暴露的**，单测全绿时它不可见。
+
+- **2026-10-13 修 `mcp-playwright` 的静默失效（主人选方案 a）+ 一次我自伤的事故**
+  - **根因**：第三方插件 `dsh-nuphus-mcp` 把 `@deepseek-ai/dsh-mcp-client` 声明为**硬依赖**（`^0.0.1-rc.1`）⇒ 旧 npm 副本被拉进 profile 并**遮蔽** checkout 真源（0.2.1-alpha.2）⇒ peer 不符 ⇒ 该行被兼容性预检改写为 `disabled`。**从 2026-10-11 装上起从未运行**（stderr 同型 69 次）。
+  - **走过的弯路（防重犯）**：先试 `overrides: link:` —— **lock 有记录但不落地目录** ⇒ 预检报 `ENOENT ... node_modules\@deepseek-ai\dsh-mcp-client\package.json`（比原状更糟）。**正解**：把该包加成 profile 的**直接 link 依赖**（与 `dsh-experimental-agent-team-profile` 同形）⇒ 符号链接落地 ✓。
+  - **⚠ 一次假绿**：中途用 `require.resolve` 判「已指向真源」并宣布成功——**那是错的**：`require.resolve` 会**从父目录逐级上溯**（命中 `profiles\node_modules` 与 `E:\alice\node_modules`），而 DSH 加载器要的是 **profile 自己那一层**。判据必须是「profile node_modules 里那个路径存在且其 package.json 可读」。
+  - **⚠ 我造成的一次事故**：为修 MCP 跑 `pnpm install` ⇒ `dsh-workbuddy-hub` 被从 registry 重装 ⇒ **我在 02:13 做的 4 处 peer 本地适配被冲掉**；随后把 `dsh-motion-ui` 加进 `bundles` 触发重新组合 ⇒ hub 因 peer 不符被 **bundle 级跳过** ⇒ **`workbuddy` provider 消失、会话回落到 `command`**。修法：官方 `allow-version dsh-workbuddy-hub@1.8.3 --dsh-version 0.2.1-alpha.2 --accept-risk`。
+  - 教训：**改 profile 依赖前先问「谁会因此被重装」**——`pnpm install` 不是只应用我的改动，它会重装一切与 lock 不符的包，**抹掉别人（含我自己）留在 node_modules 里的本地适配**。bundle 级跳过与行级 disabled 是**两种**静默失效形态，都要盯。
+  - **验收**：`plugin_mcp_check` → `active=1 · denied-runtime=0`（最后一次停用记录在 11:54:37Z，此后零停用）。
+  - **当前真实边界（诚实）**：配置层已修好，但 **`mcp__playwright__*` 工具未进工具面**——因为 **9222 端口未监听**（Edge 未以 `--remote-debugging-port=9222` 启动），`@playwright/mcp` 连不上浏览器。**要用得先开那个调试口。**
 
 ## 10 · 未决问题
 

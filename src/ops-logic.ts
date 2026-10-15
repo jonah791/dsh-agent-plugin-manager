@@ -274,9 +274,166 @@ export function pluginListLines(plugins: Array<{
   return lines
 }
 
+/**
+ * 插件行 id：包名去 `dsh-` 前缀；**已含 `agent-` 者不再叠加**。
+ *
+ * 2026-09-26 修双前缀缺陷：原式 `'agent-' + name.replace(/^dsh-/, '')` 对
+ * **目录名本身已含 `agent-`** 的自研插件（全部 `dsh-agent-*`）产出 `agent-agent-*`
+ * （已见四例：dsh-agent-vision / repair / skill-lifecycle …）。
+ *
+ * **存量无需迁移**：patch 行查找是双认的（`r.id === nm || r.name === nm`，
+ * 见 index.ts:199 与 registry.ts 各处），卸载又走「已找到的 row.id」，
+ * 故 id 改名后旧行仍可被 name 命中并正常卸载。
+ * @param name - 插件目录名或包名（`dsh-…`）。
+ * @returns 该插件在 profile patch 中的行 id。
+ */
+export function pluginRowId(name: string): string {
+  const base = name.replace(/^dsh-/, '')
+  return base.startsWith('agent-') ? base : 'agent-' + base
+}
+
+/**
+ * 脚手架模板的 peer 依赖（**单一真源**：`create()` 与测试共用；改这里即改所有未来产物）。
+ *
+ * ⚠ `@deepseek-ai/dsh-tools` 必须是 `>=` 而**不是** `^`（2026-10-15 实测 · 台账 lh-ff4ea783）：
+ * `^0.1.0-rc.6` 在 semver 里 = `>=0.1.0-rc.6 <0.2.0`，而宿主的兼容门
+ * （`deepseek-harness/packages/boot/app-boot/src/plugin-compatibility.ts:77`）用
+ * `semver.satisfies(runtimeVersion, range, { includePrerelease: true })` 比对——运行时升到
+ * `0.2.1-alpha.2` 后该比较失败，宿主**静默** disable 该插件行（挂载返回成功、patch 行也在，
+ * 但一行不生效；只有 `err` 级日志，不进模型视野）。实测 64 个既有插件全用 `>=`，
+ * 只有本骨架产物用 `^` ⇒ 模板缺陷，不是使用者的选择错。
+ */
+export const SCAFFOLD_PEER_DEPS: Readonly<Record<string, string>> = {
+  '@deepseek-ai/cordis': '^4.0.1',
+  '@deepseek-ai/schemastery': '^3.18.1-rc.1',
+  '@deepseek-ai/dsh-tools': '>=0.1.0-rc.6',
+}
+
+/**
+ * 宿主兼容门是否检查该 peer 名（`plugin-compatibility.ts:75`）：只有 `@deepseek-ai/dsh`
+ * 与 `@deepseek-ai/dsh-*` 会被比对——cordis / schemastery 不在其列。判据域必须与它一致，
+ * 否则会对门根本不检查的项误报。
+ */
+export function isDshPeerChecked(name: string): boolean {
+  return name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')
+}
+
+/** 解析后的版本（显式三字段——`noUncheckedIndexedAccess` 下元组索引访问是 `T | undefined`）。 */
+type ParsedVersion = { major: number; minor: number; patch: number; pre: string[] }
+
+/** 解析 `x.y.z[-pre]`；不可解析（含通配符/区间符）⇒ `null`。 */
+function parseVersion(raw: string): ParsedVersion | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(raw.trim())
+  if (!m) return null
+  return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]), pre: m[4] ? m[4].split('.') : [] }
+}
+
+/**
+ * semver §11 比较：`a < b` ⇒ 负数。无 prerelease 者更大；同为 prerelease 时逐段比
+ * （数字段比数值，字母段比字典序，数字段 < 字母段）。
+ */
+function compareVersions(a: ParsedVersion, b: ParsedVersion): number {
+  if (a.major !== b.major) return a.major < b.major ? -1 : 1
+  if (a.minor !== b.minor) return a.minor < b.minor ? -1 : 1
+  if (a.patch !== b.patch) return a.patch < b.patch ? -1 : 1
+  if (a.pre.length === 0 && b.pre.length === 0) return 0
+  if (a.pre.length === 0) return 1
+  if (b.pre.length === 0) return -1
+  const n = Math.max(a.pre.length, b.pre.length)
+  for (let i = 0; i < n; i++) {
+    const x = a.pre[i]
+    const y = b.pre[i]
+    if (x === undefined) return -1
+    if (y === undefined) return 1
+    if (x === y) continue
+    const xn = /^\d+$/.test(x)
+    const yn = /^\d+$/.test(y)
+    if (xn && yn) return Number(x) < Number(y) ? -1 : 1
+    if (xn) return -1
+    if (yn) return 1
+    return x < y ? -1 : 1
+  }
+  return 0
+}
+
+/**
+ * caret 上界（semver §7）：`^1.2.3` ⇒ `2.0.0`；`^0.2.3` ⇒ `0.3.0`；`^0.0.3` ⇒ `0.0.4`。
+ * 上界带 `-0`（与 node-semver 的 `^0.1.0-rc.6` ⇒ `<0.2.0-0` 对齐）。
+ */
+function caretUpper(v: ParsedVersion): ParsedVersion {
+  if (v.major > 0) return { major: v.major + 1, minor: 0, patch: 0, pre: ['0'] }
+  if (v.minor > 0) return { major: 0, minor: v.minor + 1, patch: 0, pre: ['0'] }
+  return { major: 0, minor: 0, patch: v.patch + 1, pre: ['0'] }
+}
+
+/**
+ * 近似宿主兼容门的满足性判断——覆盖模板实际会用到的三种形态（`>=X` / `^X` / 精确 `X`），
+ * 与宿主判据同语义（`includePrerelease: true`：prerelease 参与常规比较）。
+ *
+ * ⚠ **不是完整 semver 实现**：`~`、`*`、`||`、复合区间一律返回 `null` = **超出判据域**。
+ * 调用方必须把 `null` 报成「未判定」，**不得**当通过（§5.9 规则 2：恒为空的输出不是证据）。
+ * 域内的正确性由测试用宿主侧真实 semver 库标定（tests/scaffold-peer.test.mjs）。
+ * @param range - peer 范围串。
+ * @param version - 宿主运行时版本。
+ * @returns 满足性；`null` = 形态超出本判据的域或版本不可解析。
+ */
+export function satisfiesRange(range: string, version: string): boolean | null {
+  const v = parseVersion(version)
+  if (!v) return null
+  const raw = range.trim()
+  if (raw === '' || raw === '*' || raw === 'latest') return null
+
+  if (raw.startsWith('>=')) {
+    const lo = parseVersion(raw.slice(2))
+    if (!lo) return null
+    return compareVersions(v, lo) >= 0
+  }
+  if (raw.startsWith('^')) {
+    const base = parseVersion(raw.slice(1))
+    if (!base) return null
+    return compareVersions(v, base) >= 0 && compareVersions(v, caretUpper(base)) < 0
+  }
+  if (/^\d/.test(raw)) {
+    const exact = parseVersion(raw)
+    if (!exact) return null
+    return compareVersions(v, exact) === 0
+  }
+  return null
+}
+
+/**
+ * 脚手架 peer 范围对宿主运行时版本的对账（**纯函数**，版本由调用方注入）。
+ *
+ * 三类结果互不掩盖：不满足（❌）/ 未判定（⚠️：形态超域或版本读不到）/ 通过（不输出）。
+ * @param deps - peer 依赖表（通常是 `SCAFFOLD_PEER_DEPS`）。
+ * @param runtimeVersion - 宿主运行时版本；`null` = 读不到（⇒ 全部未判定，**不静默通过**）。
+ * @returns 问题行；空数组 = 全部通过。
+ */
+export function peerSatisfactionIssues(
+  deps: Readonly<Record<string, string>>,
+  runtimeVersion: string | null,
+): string[] {
+  const issues: string[] = []
+  for (const [name, range] of Object.entries(deps)) {
+    if (!isDshPeerChecked(name)) continue
+    if (runtimeVersion === null) {
+      issues.push('未判定: ' + name + ' ' + range + '（宿主运行时版本读不到）')
+      continue
+    }
+    const ok = satisfiesRange(range, runtimeVersion)
+    if (ok === null) {
+      issues.push('未判定: ' + name + ' ' + range + '（形态超出本判据的域，需人工核对）')
+    } else if (!ok) {
+      issues.push('不满足: ' + name + ' ' + range + ' 与宿主 ' + runtimeVersion
+        + ' 不兼容——宿主会**静默** disable 该插件行（挂载成功但一行不生效）')
+    }
+  }
+  return issues
+}
+
 /** `plugin_create` 的脚手架源码模板（原 `scaffoldSource`，逐字搬移）。 */
 export function scaffoldSource(name: string, description: string): string {
-  const id = 'agent-' + name.replace(/^dsh-/, '')
+  const id = pluginRowId(name)
   return [
     '/** ' + name + '：' + (description || '（待填写用途）') + ' */',
     'import type { Context } from "@deepseek-ai/cordis"',
@@ -287,7 +444,12 @@ export function scaffoldSource(name: string, description: string): string {
     'export const Config = z.object({ enabled: z.boolean().default(true) })',
     'export function apply(ctx: Context, config: Config): void {',
     '  // TODO: 在此实现插件逻辑',
-    '  ctx.on("ready", () => { ctx.logger(' + JSON.stringify(name) + ').info("ready") })',
+    '  // ⚠ cordis 4 **没有 `ready` 事件**：旧骨架曾用 ctx.on("ready", …)，导致新插件**开箱即编译失败**',
+    '  //   （TS2345: Argument of type \'"ready"\' is not assignable to parameter of type \'keyof Events\'）。',
+    '  //   2026-10-06 移除（t-83cd062f）。可选事件见其它插件样本，如 agent/pre-step、session/event。',
+    '  //   空 apply 本身即可通过类型检查 ⇒ 此处留空待实现。',
+    '  void ctx',
+    '  void config',
     '}',
   ].join('\n') + '\n'
 }
@@ -325,4 +487,59 @@ export function thirdPartyRefusal(
     '  卸载: dsh plugin --profile ' + profile + ' remove ' + name + '（一并处理依赖与 bundles）',
     '  本工具只管理自研插件（self-plugins/*）；第三方盘点用 plugin_list（source=third-party）与 plugin_boot_status（thirdParty）。',
   ].join('\n')
+}
+
+/**
+ * 语义注册表里是否存在该 id（**精确命中**，不数正文提及）。
+ *
+ * 判据放纯层：输入是**已读到的** registry JSON 文本，输出 bool。
+ * 解析失败 / 结构不符 / id 非字符串 ⇒ `false`（**不得抛**——调用点在退役流程上，抛会中断退役）。
+ */
+export function registryHasIdFromText(registryText: string, id: string): boolean {
+  try {
+    const d = JSON.parse(registryText) as { entries?: unknown }
+    if (!Array.isArray(d.entries)) return false
+    return d.entries.some(e =>
+      e !== null && typeof e === 'object' && (e as { id?: unknown }).id === id)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * purge 影响面的可读渲染 —— 工具 render 与离线测试**共用同一份文案**，
+ * 避免「测试断言的文案」与「线上显示的文案」漂移（§5.22 判据单一真源）。
+ */
+export function purgeReportLines(v: {
+  ok: boolean
+  dryRun: boolean
+  name: string
+  profile: string
+  error?: string
+  dirExists: boolean
+  dirBytes: number
+  archivedTo?: string
+  gitlinkMode?: string
+  semanticPresent: boolean
+  referenceCount: number
+  traceWritten: boolean
+}): string[] {
+  if (v.ok !== true) return ['彻底退役失败：' + (v.error && v.error !== '' ? v.error : '(无原因)')]
+  // 口径：dirBytes 是「文件 st.size 累加」，**含硬链接重复计入**——pnpm 的 node_modules 大量用硬链接，
+  // 实测比 `du` 的磁盘占用大约一倍（2026-10-03 purge dsh-agent-thinking：本函数报 52.6 MB，
+  // `du -sh` 为 26 MB）。⇒ 报体积必须带口径，故文案里显式标注（「读数必须自带范围标注」§5.9 规则 6）。
+  const mb = (v.dirBytes / 1048576).toFixed(1)
+  const lines = [
+    (v.dryRun ? '【干跑】' : '【已执行】') + '彻底退役 ' + v.name + '@' + v.profile,
+    '· 插件目录：' + (v.dirExists ? '在（' + mb + ' MB · 文件大小累加口径，硬链接重复计入）' : '不存在')
+      + (v.archivedTo === undefined || v.archivedTo === '' ? '' : ' → 已归档 ' + v.archivedTo),
+    '· gitlink：' + (v.gitlinkMode === undefined || v.gitlinkMode === ''
+      ? '无' : v.gitlinkMode + '（需人工 git rm --cached）'),
+    '· 语义注册表条目：' + (v.semanticPresent ? '仍在 ⇒ 需 dsh-semantic-docs 注销' : '不存在'),
+    '· 待改引用：' + v.referenceCount + ' 处（未改动）',
+  ]
+  lines.push(v.dryRun
+    ? '· 干跑：零改动；加 apply=true 执行'
+    : '· 留痕：' + (v.traceWritten ? '已写入 plugin-purge-trace.jsonl' : '写入失败（见日志）'))
+  return lines
 }
