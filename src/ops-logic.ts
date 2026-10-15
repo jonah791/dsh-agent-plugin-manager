@@ -293,6 +293,44 @@ export function pluginRowId(name: string): string {
 }
 
 /**
+ * 脚手架模板的 `pnpm-workspace.yaml`（**单一真源**：`create()` 与测试共用）。
+ *
+ * 为什么必须有（本机约定 2026-09-26 立）：pnpm 默认 `autoInstallPeers: true`，会把
+ * `peerDependencies` 从 registry 拉回**真实副本**落到 `node_modules/@deepseek-ai`，
+ * **遮蔽宿主链接层** ⇒ 同一插件内新旧版本混搭（实测物证：某插件的
+ * `node_modules/@deepseek-ai.BAK-20260926-081113` 就是遮蔽后手工改名的残留）。
+ * ⚠ 不要用 `.npmrc`——pnpm 11.7.0 已不再从那里读该设置（两种写法实测均无效）。
+ *
+ * ⚠ 这是「**模板是缺口复制器**」的又一实例（与 `SCAFFOLD_PEER_DEPS` 同形状，t-cc516d56）：
+ * 既有多个插件都有这份文件，但骨架不生成 ⇒ 每个新插件都要手动补。
+ */
+export const SCAFFOLD_PNPM_WORKSPACE: string = [
+  '# 本机约定（2026-09-26 立）：禁止把 peerDependencies 装成真实副本。',
+  '#',
+  '# 背景：pnpm 默认 autoInstallPeers=true，会把 peerDependencies 从 registry 拉回真实副本',
+  '# 落到 node_modules/@deepseek-ai，**遮蔽宿主链接层** ⇒ 同一插件内新旧版本混搭。',
+  '#',
+  '# ⚠️ 不要用 .npmrc —— pnpm 11.7.0 已不再从 .npmrc 读取该设置',
+  '#    （auto-install-peers 与 autoInstallPeers 两种写法实测均无效）。',
+  '#    必须在 pnpm-workspace.yaml 里用 camelCase 的 autoInstallPeers。',
+  'autoInstallPeers: false',
+  '',
+].join('\n')
+
+/**
+ * 校验脚手架产出的 `pnpm-workspace.yaml` 是否真能防住遮蔽（纯函数：喂内容给判据）。
+ * @param content - 文件内容。
+ * @returns 问题行；空数组 = 通过。
+ */
+export function workspaceFileIssues(content: string): string[] {
+  const issues: string[] = []
+  if (!/^autoInstallPeers:\s*false\s*$/m.test(content)) {
+    issues.push('未声明 `autoInstallPeers: false` ⇒ pnpm 会把 peer 装成真实副本，遮蔽宿主链接层')
+  }
+  return issues
+}
+
+/**
  * 脚手架模板的 peer 依赖（**单一真源**：`create()` 与测试共用；改这里即改所有未来产物）。
  *
  * ⚠ `@deepseek-ai/dsh-tools` 必须是 `>=` 而**不是** `^`（2026-10-15 实测 · 台账 lh-ff4ea783）：

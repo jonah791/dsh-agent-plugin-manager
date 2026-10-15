@@ -43,8 +43,10 @@ import {
   purgeReportLines,
   registryHasIdFromText,
   SCAFFOLD_PEER_DEPS,
+  SCAFFOLD_PNPM_WORKSPACE,
   scaffoldSource,
   thirdPartyRefusal,
+  workspaceFileIssues,
   type LifecycleAction,
   type SessionDirEntry,
   type SessionListItem,
@@ -655,18 +657,30 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
         }, null, 2) + '\n', 'utf8')
         writeFileSync(join(dir, 'src/index.ts'), scaffoldSource(nm, description || ''), 'utf8')
         writeFileSync(join(dir, 'README.md'), '# ' + nm + '\n\n' + (description || '（待填写用途）') + '\n', 'utf8')
+        // pnpm-workspace.yaml：防 peer 被装成真实副本（遮蔽宿主链接层）——本机约定 2026-09-26 立。
+        writeFileSync(join(dir, 'pnpm-workspace.yaml'), SCAFFOLD_PNPM_WORKSPACE, 'utf8')
         eventLog('创建插件 ' + nm + ' @ ' + dir)
-        // 守卫：新建即断言 peer 范围满足宿主运行时版本。**模板是缺口复制器**——不在这里拦，
-        // 每个未来产物都会带着同一个缺陷出去（2026-10-15 实测 · 台账 lh-ff4ea783）。
+        // 守卫：新建即断言（**模板是缺口复制器**——不在这里拦，每个未来产物都会带着同一个缺陷出去）。
         // ⚠ 不阻断创建：判据自身也可能读不到宿主版本，「未判定」必须报出来，而不是让创建失败。
         const peerIssues = peerSatisfactionIssues(SCAFFOLD_PEER_DEPS, hostRuntimeVersion())
-        if (peerIssues.length === 0) return { ok: true, dir }
-        return {
-          ok: true,
-          dir,
-          warning: '脚手架 peer 范围与宿主运行时**不匹配**（该插件挂载后会被宿主静默 disable：'
-            + '挂载返回成功、patch 行也在，但一行不生效）：\n  ' + peerIssues.join('\n  '),
+        // 第二道守卫：**读回**刚写的 pnpm-workspace.yaml，确认它真能防住遮蔽（写失败/内容被改都能抓到）。
+        let workspaceIssues: string[] = []
+        try {
+          workspaceIssues = workspaceFileIssues(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8'))
+        } catch (err) {
+          workspaceIssues = ['pnpm-workspace.yaml 读不回（写入可能失败）：' + String(err)]
         }
+        if (peerIssues.length === 0 && workspaceIssues.length === 0) return { ok: true, dir }
+        const parts: string[] = []
+        if (peerIssues.length > 0) {
+          parts.push('脚手架 peer 范围与宿主运行时**不匹配**（该插件挂载后会被宿主静默 disable：'
+            + '挂载返回成功、patch 行也在，但一行不生效）：\n  ' + peerIssues.join('\n  '))
+        }
+        if (workspaceIssues.length > 0) {
+          parts.push('脚手架 pnpm-workspace.yaml 有问题（依赖会被装成真实副本、遮蔽宿主链接层）：\n  '
+            + workspaceIssues.join('\n  '))
+        }
+        return { ok: true, dir, warning: parts.join('\n\n') }
       } catch (err) {
         return { ok: false, error: '创建失败: ' + String(err) }
       }

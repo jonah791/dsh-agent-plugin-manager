@@ -19,6 +19,8 @@ import {
   peerSatisfactionIssues,
   satisfiesRange,
   SCAFFOLD_PEER_DEPS,
+  SCAFFOLD_PNPM_WORKSPACE,
+  workspaceFileIssues,
 } from '../lib/ops-logic.js'
 
 /** 宿主真实运行时版本（2026-10-15 实测：app-boot 与 dsh-tools 同号）。 */
@@ -159,4 +161,27 @@ test('金标准·穷举对账：网格样本上与宿主 semver 零分歧', { sk
   }
   assert.ok(checked >= 500, '样本量过低，判据无分辨力: ' + checked)
   assert.deepEqual(diffs.slice(0, 10), [], `分歧 ${diffs.length} 处（前 10）:\n` + diffs.slice(0, 10).join('\n'))
+})
+
+// ── pnpm-workspace.yaml 守卫（t-cc516d56：同形状的第二个模板缺口）──────────
+test('SCAFFOLD_PNPM_WORKSPACE：含顶层 autoInstallPeers: false（防 peer 被装成真实副本）', () => {
+  assert.match(SCAFFOLD_PNPM_WORKSPACE, /^autoInstallPeers:\s*false\s*$/m)
+  assert.deepEqual(workspaceFileIssues(SCAFFOLD_PNPM_WORKSPACE), [])
+})
+
+test('尸体：内容缺 autoInstallPeers: false ⇒ 必须报出（判据真会拦）', () => {
+  const broken = SCAFFOLD_PNPM_WORKSPACE.replace('autoInstallPeers: false', 'autoInstallPeers: true')
+  const issues = workspaceFileIssues(broken)
+  assert.equal(issues.length, 1, '应恰好 1 条：' + JSON.stringify(issues))
+  assert.match(issues[0], /autoInstallPeers/)
+  assert.match(issues[0], /遮蔽/)
+})
+
+test('尸体：空文件 / 只留注释 ⇒ 同样报出（不静默通过）', () => {
+  assert.equal(workspaceFileIssues('').length, 1)
+  assert.equal(workspaceFileIssues('# 注释\n').length, 1)
+})
+
+test('尸体：缩进的 autoInstallPeers 不算（必须是顶层键——嵌套在别处不生效）', () => {
+  assert.equal(workspaceFileIssues('  autoInstallPeers: false\n').length, 1)
 })
