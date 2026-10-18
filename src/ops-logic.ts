@@ -10,10 +10,30 @@
  * 抽取纪律：判据逐字照搬（含 `> webStartMs + 1000` 的单向容差、`delegationDepth === 0` 过滤、
  * 分组 `order ?? 99` 排序、档案字段白名单），只把 `process.uptime()/ctx.sessions` 换成显式参数。
  */
+import { join } from 'node:path'
 import type { PluginArchive } from './registry.ts'
 
 /** 构建时效容差（ms）：mtime 必须**晚于** web 启动 1s 以上才算「未验证的新构建」（原判据）。 */
 export const BUILD_SKEW_MS = 1000
+
+/**
+ * 组合面文件清单（纯路径构造；存在性与 mtime 由 IO 层处理）。
+ *
+ * 为什么单列（2026-10-19 实测漏洞）：原先「未验证构建」只比 self-plugins 的 `lib/index.js` mtime
+ * ⇒ **只改 patch/preset 声明、不重建任何插件**时，`preflight_check` 走「现有实例健康」短路，
+ * **根本不 spawn 试运行**——新加/改过的 preset 行从未被验证过。判据与插件构建同源：mtime 晚于
+ * 本进程启动 ⇒ 磁盘组合 ≠ 本进程加载的组合 ⇒ 必须完整试运行。
+ *
+ * ⚠ 刻意**不含** `cordis.yml`：它由启动过程自己物化写出（实测 2026-10-19：写入 01:02:32，
+ * 而本进程 01:02:19 启动）⇒ 纳入会把每次预检都变成「组合变更」（恒假阳性）。
+ */
+export function compositionFilePaths(dshHome: string, profile: string): string[] {
+  return [
+    join(dshHome, 'cordis.patch.yml'),
+    join(dshHome, 'profiles', profile, 'cordis.patch.yml'),
+    join(dshHome, 'profiles', profile, 'package.json'),
+  ]
+}
 
 /** 插件名校验：小写字母开头，仅 [a-z0-9-]（`plugin_create` 的第一道判据）。 */
 export const PLUGIN_NAME_RE = /^[a-z][a-z0-9-]*$/

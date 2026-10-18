@@ -33,7 +33,7 @@
 | 来源（source） | `self`（`self-plugins/` 内）/ `official`（`@deepseek-ai/*`）/ `third-party`（profile 里 `link:` 指向 self-plugins 之外的包） |
 | 挂载状态（status） | `mounted` / `disabled` / `unmounted`——**以运行时 loader 为权威**，静态快照（`data/system-state.json`）只作补充 |
 | 组合变更（composition change） | 改 `cordis.patch.yml` 或改插件代码后重新构建；**此时旧实例健康不构成免检理由**（AGENTS.md §5.11） |
-| 未验证构建（unverified build） | 某 `self-plugins/*/lib/index.js` 的 mtime 晚于本 web 进程启动时刻（`hasUnverifiedBuilds()`） |
+| 未验证构建（unverified build） | 某 `self-plugins/*/lib/index.js` **或组合面文件（profile 的 `cordis.patch.yml` / `package.json`）** 的 mtime 晚于本 web 进程启动时刻（`hasUnverifiedBuilds()`；组合面于 2026-10-19 加入——「只改声明不重建」原先会走短路） |
 | 哨兵（sentinel flag） | `<DSH_HOME>/.hot-reload-flag`（JSON：`workspace/sessionId/note`）——写入即请求 watch 执行「预检 → 重启 → 唤醒 → 清哨兵」 |
 | 进程级判据 | 重启闸门的判据是「**本 web 进程启动后**是否调用过 `preflight_check`」，**不比对会话 id**（§5.11 §3，设计如此） |
 | 回滚（rollback） | 用 `.bak-<ISO 时间戳>` 副本覆盖回原文件（`rollbackFile`） |
@@ -171,7 +171,8 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
 | A1 | 工具面恰为 **11** 个（含 `plugin_audit`/`preflight_check`/`daemon_restart`） | `grep -n "^\s*name: '" src/index.ts` → 9 个字面 `name:`（plugin_list/inspect/audit/create/mount/unmount/configure/preflight_check/daemon_restart）+ 1 行循环（L551 `for` 覆盖 plugin_start/plugin_stop）= **11** | 已实测（2026-09-22 复核实测：修前口径 10 个已过时，plugin_audit 于 2026-09-17 加入） |
 | A2 | patch 行编辑保留注释与其余块（幂等：同 id 再插返回 `inserted:false`） | `node --test test/registry.test.mjs`（`patchInsert`/`patchSetDisabled`/`patchSetConfig`/`patchRemove` 四组用例） | 待验收 |
 | A3 | 档案状态以 loader 为权威（静态快照不覆盖动态状态） | `test/registry.test.mjs:buildRegistry 全量对账` + `plugin_list` 与 `plugin_inspect` 对同一插件状态一致 | 待验收 |
-| A4 | 未验证构建 → 强制完整试运行（不短路） | 构建任一插件后调 `preflight_check`：耗时应为数十秒（完整试运行），而非毫秒级 | 待验收 |
+| A4 | 未验证构建 → 强制完整试运行（不短路） | 构建任一插件后调 `preflight_check`：耗时应为数十秒（完整试运行），而非毫秒级。**【2026-10-19 部分实测】**组合面扩面有单测（`tests/ops-logic.test.mjs` 3 条：平台无关期望值 / 排除自写 `cordis.yml` 的理由 / 前缀单一真源 + 组合检测带 profile）；lib-mtime 那一半仍无受控实测 | 部分实测（组合面已测；lib-mtime 待线上） |
+| A15 | **试运行预设探针真的会上报**（「能启动」≠「能建会话」） | ① 源码级契约：`tests/ops-logic.test.mjs` 断言 `index.ts` 从 `dsh-agent-preflight/core` import `PRESET_PROBE_PREFIX`（不得自写字面量——第二写者＝漂移源）；② 端到端（在 `dsh-agent-preflight` 侧）：`PREFLIGHT_E2E=1 node --test tests/e2e-preset-probe.test.mjs` 两例全过——绿例（无 overlay ⇒ 全预设可激活）与**尸体例**（`--patch` 注入同 scope 重名预设 ⇒ `presets` 红、其余 9 项 ok）。**首次真实运行抓出并修复 `worker-base` 预设的 4 行缺必填 config** | ✔ 已实测（端到端，2026-10-19） |
 | A5 | 闸门 fail-closed：未预检 / 预检未过 / 记录不可读 → `daemon_restart` 拒绝 | `test/preflight-gate.test.mjs` 中 `decidePreflightGate` 四条判据用例；线上：删除/改坏 `.preflight-invoked.json` 后重启必须被拒 | 待验收 |
 | A6 | 预检失败必回滚且不写哨兵 | 造一次必然 FAIL 的插入 → 操作返回 `ok:false` + `.bak-*` 已还原 + `.hot-reload-flag` 未更新 | 待验收 |
 | A7 | 事件日志吞错不阻断（观测不反噬主流程） | `grep -n "appendLineSafe\|catch" src/event-log.ts`（返回 bool、不抛）+ `.plugin-manager-events.log` 存在且末行格式 `[ISO] 消息` | 待验收 |
@@ -266,6 +267,12 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
   - 教训：**改 profile 依赖前先问「谁会因此被重装」**——`pnpm install` 不是只应用我的改动，它会重装一切与 lock 不符的包，**抹掉别人（含我自己）留在 node_modules 里的本地适配**。bundle 级跳过与行级 disabled 是**两种**静默失效形态，都要盯。
   - **验收**：`plugin_mcp_check` → `active=1 · denied-runtime=0`（最后一次停用记录在 11:54:37Z，此后零停用）。
   - **当前真实边界（诚实）**：配置层已修好，但 **`mcp__playwright__*` 工具未进工具面**——因为 **9222 端口未监听**（Edge 未以 `--remote-debugging-port=9222` 启动），`@playwright/mcp` 连不上浏览器。**要用得先开那个调试口。**
+
+- **2026-10-19 预检增强（`agent-preset/invalid` 事故驱动 · 主人指令「先增强一下预检能力」）**
+  - **事故**：把 `dsh-skill-router` 挂进预设（与同 scope 的官方 `tool-skill` 重名注册 `skill`）后，**新建会话报** `agent-preset/invalid: … tool "skill" is already registered in this scope`；当时预检全绿——`preflight-trace.jsonl` 里那几次 full 预检**全是 `shortcut:true`**。
+  - 语义**被补充**：① `hasUnverifiedBuilds` 候选加入**组合面文件**（profile 的 `cordis.patch.yml` / `package.json`）——「只改声明不重建」原先短路成立，新 preset 行从未被试运行验证过；刻意**不含** `cordis.yml`（启动过程自写，纳入即恒假阳性）。② **试运行预设探针**：`DSH_PREFLIGHT_TRIAL=1` 实例在 apply 后问一次 `agentPresets.list()`，以一行 `[preflight-preset-probe] {json}` 上报；③ `preflight_check` 在短路/quick 模式把**本进程**注册表诊断作为 `livePresetProbe` 传下去。
+  - **首次真实运行即抓出真缺陷**：`worker-base` 预设四行缺必填 config（`agent-instructions.maxBytes` / `tool-fs-search.sampleOverCapGlobResults` / `tool-todo.allowParallelInProgress` / `plan-mode.section`）⇒ 该预设整体 broken。已修（单独提交在 profile patch，不属于本插件）。
+  - 教训：**「工具面在跑」与「会话能建」之间隔着预设这一层**——本插件的检出力此前到不了那一层；补法不是加猜测，而是**让试运行实例回头问一次权威注册表**（同一份 `list()`，正是建会话路径用的判据）。
 
 ## 10 · 未决问题
 

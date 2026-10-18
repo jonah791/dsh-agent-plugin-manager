@@ -8,8 +8,11 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   BUILD_SKEW_MS,
+  compositionFilePaths,
   filterArchives,
   groupOrderedPlugins,
   isValidPluginName,
@@ -329,4 +332,32 @@ test('toolFindLines: 长用途只在渲染层截断（数据层保真，不改�
   const text = toolFindLines(hits, 'p').join('\n')
   assert.ok(!text.includes('x'.repeat(200)), '超长用途不得原样进输出')
   assert.equal(hits[0].purpose, longPurpose, '★ 数据层不得被改动——截断只发生在渲染层')
+})
+
+// ── 组合变更检测扩面（2026-10-19 · agent-preset/invalid 事故驱动）────────────────
+// 事故形状：只改 preset/patch 声明、不重建任何插件 ⇒ 旧判据（只比 lib mtime）判「无未验证构建」
+// ⇒ preflight_check 走「现有实例健康」短路 ⇒ **根本不 spawn 试运行** ⇒ 新 preset 行从未被验证。
+
+test('compositionFilePaths: 覆盖 profile 的 patch 与清单（平台无关：用 join 现算期望值）', () => {
+  assert.deepEqual(compositionFilePaths('/dsh', 'web'), [
+    join('/dsh', 'cordis.patch.yml'),
+    join('/dsh', 'profiles', 'web', 'cordis.patch.yml'),
+    join('/dsh', 'profiles', 'web', 'package.json'),
+  ])
+})
+
+test('compositionFilePaths: **不含** cordis.yml——它由启动过程自己物化写出，纳入即恒假阳性', () => {
+  const paths = compositionFilePaths('/dsh', 'web')
+  assert.ok(!paths.some(p => p.endsWith('cordis.yml')),
+    'cordis.yml 实测写入晚于进程启动（2026-10-19：写 01:02:32 / 进程起 01:02:19）⇒ 纳入会让每次预检都变成组合变更')
+  assert.ok(paths.some(p => p.endsWith('cordis.patch.yml')), 'patch 必须在内（它就是预设声明的落点）')
+})
+
+test('探针上报前缀单一真源：index.ts 必须 import 常量、不得自写字面量；组合检测必须带 profile', () => {
+  const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  assert.match(src, /import \{ PRESET_PROBE_PREFIX/, '前缀必须来自 dsh-agent-preflight/core（父进程按同一常量解析）')
+  assert.ok(!src.includes("'[preflight-preset-probe] '"),
+    '不得在 index.ts 里再写一份字面量——第二写者＝漂移源（父进程解析不到就成了静默假绿）')
+  assert.match(src, /hasUnverifiedBuilds\(dshHome, profile\)/,
+    '组合变更检测必须带上 profile（组合面文件按 profile 定位）')
 })

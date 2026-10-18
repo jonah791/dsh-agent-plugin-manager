@@ -11,7 +11,7 @@
 # dsh-agent-plugin-manager
 
 <p align="center">
-  <a href="https://github.com/jonah791/dsh-agent-plugin-manager"><img src="https://img.shields.io/badge/version-0.2.0-blue" alt="version"></a>
+  <a href="https://github.com/jonah791/dsh-agent-plugin-manager"><img src="https://img.shields.io/badge/version-0.2.1-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
   <img src="https://img.shields.io/badge/tests-179%20passed-brightgreen" alt="tests">
@@ -68,7 +68,7 @@
 
 （四项路径均可留空回退：`selfPluginsDir`/`profilesDir` 回退到 `${DSH_HOME}/` 下同名目录，`bin` 回退 `require.resolve('@deepseek-ai/dsh/lib/bin.js')`，`defaultWorkspace` 回退 `process.cwd()`。**显式配置更清晰**——回退值依赖进程 cwd，非 web profile 下未必是你想要的。）
 
-**3) 30 秒验证**：调 `plugin_list` → 期望返回三条来源分组（自研/官方/非官方）且 `count` 与列表长度一致；再 `plugin_inspect dsh-agent-plugin-manager` → 期望 `ok: true`、`status` 与运行时 loader 一致、`version` 为 `0.2.0`。
+**3) 30 秒验证**：调 `plugin_list` → 期望返回三条来源分组（自研/官方/非官方）且 `count` 与列表长度一致；再 `plugin_inspect dsh-agent-plugin-manager` → 期望 `ok: true`、`status` 与运行时 loader 一致、`version` 为 `0.2.1`。
 
 > 只读面永不抛：单个坏插件（缺 `package.json`、目录不可读）会被逐目录 `try/catch` 跳过，不影响整体返回。
 
@@ -132,11 +132,14 @@ stat -c '%y' self-plugins/dsh-agent-plugin-manager/lib/index.js   # ① 本插�
 
 **生效判据**（三选一，按可靠性排序）：
 
-1. **行为级（最直接）**：本会话工具列表里 11 个工具齐（含 `tool_find`/`preflight_check`/`daemon_restart`）；`plugin_inspect dsh-agent-plugin-manager` 返回 `status: mounted`、`version: 0.2.0`。
+1. **行为级（最直接）**：本会话工具列表里 11 个工具齐（含 `tool_find`/`preflight_check`/`daemon_restart`）；`plugin_inspect dsh-agent-plugin-manager` 返回 `status: mounted`、`version: 0.2.1`。
 2. **证据级**：调 `preflight_check {mode:'quick'}` 前后各 `cat` 一次 `${DSH_HOME}/.preflight-invoked.json`，`atMs` **前进** ⇒ 当前进程在跑本插件（不是「文件里有过记录」）。
 3. **进程级**：`self-plugins/dsh-agent-plugin-manager/lib/index.js` 的 mtime **≤** web 进程启动时刻，且 `src/` 不新于 `lib/`（源码改了没构建 = 跑的还是旧产物）。
 
-> ⚠ **重新构建 ≠ 生效**：产物 mtime 新只证明「构建过」，**进程启动时间晚于产物 mtime 才算「在跑它」**（AGENTS §5.11 §6）。本插件自己就用这个口径：`hasUnverifiedBuilds()` 发现任一 `self-plugins/*/lib/index.js` 比本进程启动晚 → 强制**完整试运行**（约数十秒）；毫秒级返回 = 短路（走了「现有实例健康」），数十秒 = 真试运行。
+> ⚠ **重新构建 ≠ 生效**：产物 mtime 新只证明「构建过」，**进程启动时间晚于产物 mtime 才算「在跑它」**（AGENTS §5.11 §6）。本插件自己就用这个口径：`hasUnverifiedBuilds()` 发现任一 `self-plugins/*/lib/index.js` **或 profile 的 `cordis.patch.yml` / `package.json`** 比本进程启动晚 → 强制**完整试运行**（约数十秒）；毫秒级返回 = 短路（走了「现有实例健康」），数十秒 = 真试运行。
+> 📌 **2026-10-19 扩面（`agent-preset/invalid` 事故驱动）**：候选加入**组合面文件**——「只改 patch/preset 声明、不重建任何插件」的那种形状原先会走短路，**新 preset 行从未被试运行验证过**。刻意**不含** `cordis.yml`：它由启动过程自己物化写出（实测写入晚于进程启动）⇒ 纳入即恒假阳性。
+> 📌 **试运行预设探针（同日新增）**：预检试运行实例（`DSH_PREFLIGHT_TRIAL=1`）里，本插件在 apply 后问一次 `agentPresets.list()`，把结果以一行 `[preflight-preset-probe] {json}` 打到 stdout，供 `dsh-agent-preflight` 的 `presets` 判据解析。**为什么**：预设激活失败**不影响 web 启动**，只在**新建会话**时抛 `agent-preset/invalid`——「能启动」≠「能建会话」。短路/quick 模式下 `preflight_check` 会把**本进程**的注册表诊断作为 `livePresetProbe` 传下去（来源标注「当前进程组合」）。
+> ℹ️ 探针**首次真实运行**即抓出一处真缺陷：`worker-base` 预设四行缺必填 config ⇒ 该预设整体 broken（任何用它的新建会话必报 `agent-preset/invalid`）。已修；详见 `dsh-agent-preflight/docs/semantic.md` 验收 A18/A19。
 >
 > 另注意：`npm test` 脚本**不含构建步骤**，改完源码务必先 `npm run build`——`tests/*.test.mjs` 是从 `../lib/*.js` 导入的。
 >

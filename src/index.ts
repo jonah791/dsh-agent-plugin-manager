@@ -23,10 +23,13 @@ import type {} from '@deepseek-ai/dsh-session'
 import { buildRegistry, alignWithLoader, readPatch, parsePatchRows, type PluginArchive } from './registry.ts'
 import { detectDrift } from './drift.ts'
 import { patchInsert, patchRemove, patchSetDisabled, patchSetConfig, packageAddLinkDep, packageRemoveDep, installProfile, preflight, rollbackFile } from './profile.ts'
+// 预设探针的上报前缀/载荷类型与预检共享（单一真源：父进程按同一常量解析试运行输出）
+import { PRESET_PROBE_PREFIX, type PresetProbePayload } from 'dsh-agent-preflight/core'
 import { decidePreflightGate, extractCaller, callerComparison, describeCaller, type CallerInfo, type GateDecision, type PreflightRecord } from './preflight-gate.ts'
 // 纯逻辑层（可离线单测，见 tests/ops-logic.test.mjs）+ 事件日志薄壳（tests/event-log.test.mjs）
 import {
   anyBuildNewerThan,
+  compositionFilePaths,
   DEFAULT_INFLIGHT_WINDOW_MS,
   describeInFlight,
   describeInFlightSessions,
@@ -106,8 +109,12 @@ export type { PluginArchive } from './registry.ts'
  * 本插件挂 web profile（进程即 web 实例）→ 用 process.uptime() 反推本进程启动时间。
  * 扫描失败/无 self-plugins → 保守返回 true（走完整试运行，宁严勿漏）。
  * 判据本体 = anyBuildNewerThan（ops-logic.ts，纯函数：mtime 与启动时刻显式传入）。
+ *
+ * 2026-10-19 扩面（事故驱动）：候选里**加入组合面文件**（profile 的 cordis.patch.yml / package.json）。
+ * 原判据只看 `lib/index.js` ⇒ 「只改 preset 声明、不重建插件」时短路成立，而短路**不 spawn 试运行**
+ * ⇒ 新 preset 行（含它的重名注册风险）从未被验证——当夜 `agent-preset/invalid` 就这样漏过预检。
  */
-function hasUnverifiedBuilds(dshHome: string): boolean {
+function hasUnverifiedBuilds(dshHome: string, profile: string): boolean {
   try {
     // 本进程即 web 实例（plugin-manager 挂 web profile）——启动时间 = now - uptime
     const webStartMs = Date.now() - process.uptime() * 1000
@@ -134,10 +141,74 @@ function hasUnverifiedBuilds(dshHome: string): boolean {
         } catch { /* 单插件不可读跳过 */ }
       }
     }
+    // 组合面文件（patch / 清单）：mtime 晚于本进程启动同样代表「磁盘组合 ≠ 本进程组合」——
+    // 只比 lib mtime 会漏掉「只改预设/patch 声明、不重建任何插件」这一形状（2026-10-19 实测：
+    // 那种情况下 preflight_check 走短路，新 preset 行从未被试运行验证过）。
+    for (const p of compositionFilePaths(dshHome, profile)) {
+      try {
+        if (existsSync(p)) builds.push({ name: p, mtimeMs: statSync(p).mtimeMs })
+      } catch { /* 单文件不可读跳过 */ }
+    }
     return anyBuildNewerThan(builds, webStartMs)
   } catch {
     return true // 异常保守：走完整试运行
   }
+}
+
+// ---------- 预设探针（2026-10-19 · 预检增强 · agent-preset/invalid 事故驱动） ----------
+
+/** `agentPresets` 服务的结构视图（不 import 宿主包类型：本插件只用到 list()）。 */
+interface AgentPresetsLike {
+  list(): Promise<Array<{ id: string; broken?: string }>>
+}
+
+/**
+ * 读一次预设注册表：`list()` 里每条 `broken` 就是「新建会话会报 agent-preset/invalid」的预设。
+ *
+ * 两个调用位：
+ *   ① 试运行实例内（`DSH_PREFLIGHT_TRIAL=1`）⇒ 上报给父进程，成为预检的 `presets` 判据；
+ *   ② 短路/quick 模式的**在飞组合**诊断（`preflight_check` 工具传入）⇒ 同一判据，来源标注不同。
+ *
+ * ⚠ 调用纪律（注册表自己的注释）：不得在 Host 行自己的激活过程中调用（它会等 loader 结算）。
+ * 因此本函数只在 apply() 返回后由 detached 异步流程调用，并轮询等待服务出现。
+ */
+async function collectPresetReport(ctx: Context, timeoutMs = 30000, intervalMs = 250): Promise<PresetProbePayload> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const registry = (ctx as unknown as { get(name: string): unknown }).get('agentPresets') as AgentPresetsLike | undefined
+    if (registry !== undefined) {
+      try {
+        const rows = await registry.list()
+        const presets = rows.map(row => row.broken === undefined ? { id: row.id } : { id: row.id, broken: row.broken })
+        return { ok: presets.every(row => row.broken === undefined), supported: true, presets, atMs: Date.now(), pid: process.pid }
+      } catch (e) {
+        return { ok: false, supported: true, presets: [], error: '预设枚举失败: ' + String((e as Error).message ?? e), atMs: Date.now(), pid: process.pid }
+      }
+    }
+    if (Date.now() >= deadline) {
+      // 「服务没出现」不是失败而是**披露**（本组合无预设可检）；用 supported=false 表达，
+      // 不塞 error —— 父进程把 error 当探针自身失败（那会把「无预设可检」误判成红）。
+      return { ok: true, supported: false, presets: [], atMs: Date.now(), pid: process.pid }
+    }
+    await new Promise<void>(resolve => { setTimeout(resolve, intervalMs) })
+  }
+}
+
+/**
+ * 试运行预设探针：只在预检试运行实例里跑（`DSH_PREFLIGHT_TRIAL=1` 由 dsh-agent-preflight spawn 时打标），
+ * 把注册表诊断以一行 JSON 打到 stdout，供试运行父进程解析成 `presets` 判据。
+ *
+ * 为什么走 stdout 而不是侧车文件：试运行的全部证据已经在它的输出流里（父进程本来就在收集），
+ * 少一个文件生命周期（无残留、无陈旧 pid 判定）。观测绝不反噬：任何异常都收敛成一行「探针异常」上报。
+ */
+function startTrialPresetProbe(ctx: Context): void {
+  void collectPresetReport(ctx)
+    .catch((e: unknown): PresetProbePayload => ({
+      ok: false, supported: true, presets: [], error: '探针异常: ' + String((e as Error).message ?? e), atMs: Date.now(), pid: process.pid,
+    }))
+    .then((report) => {
+      try { process.stdout.write(PRESET_PROBE_PREFIX + JSON.stringify(report) + '\n') } catch { /* 父进程会按「未上报」处理 */ }
+    })
 }
 
 /** 档案投影实现见 ops-logic.ts（纯函数，可离线单测）；此处经 `export { publicArchive }` 保持公共 API 不变。 */
@@ -732,6 +803,11 @@ export function apply(ctx: Context, config: Config): void {
   const ops = createOps(ctx, config, loader)
   ctx.plugin(PluginManagerRemoteService, ops)
 
+  // ---------- 试运行预设探针（2026-10-19 · 预检增强） ----------
+  // 预检试运行实例（dsh-agent-preflight spawn 时打的 DSH_PREFLIGHT_TRIAL=1）里顺手问一次预设注册表：
+  // 预设激活失败**不影响 web 启动**，只在新建会话时抛 agent-preset/invalid ⇒ 不主动问，试运行永远是绿的。
+  if (process.env.DSH_PREFLIGHT_TRIAL === '1') startTrialPresetProbe(ctx)
+
   const require = createRequire(import.meta.url)
 
   // ---------- 预检调用记录 + 重启前校验（主人 2026-08-30：重启前必须检查会话中是否调用过预检工具） ----------
@@ -1130,13 +1206,18 @@ export function apply(ctx: Context, config: Config): void {
       // 现有实例健康即组合可加载 → probeExistingFirst=true 毫秒级短路；quick 模式无试运行。
       // 2026-09-05 主人反思修复：改代码后重启 = 组合变更，不能短路——
       // self-plugins 任一插件的 lib 比当前 web 启动晚（刚构建未验证）→ 强制完整试运行验证新组合。
-      const probeFirst = profile === 'web' && !hasUnverifiedBuilds(dshHome)
+      // 2026-10-19 扩面：**组合面文件**（profile 的 cordis.patch.yml / package.json）晚于本进程启动
+      // 同样算组合变更（只改 preset 声明不重建插件的那种形状，原先会走短路 ⇒ 新 preset 行从未被验证）。
+      const probeFirst = profile === 'web' && !hasUnverifiedBuilds(dshHome, profile)
       const pr = await preflight({
         bin, profile,
         workspace: config.defaultWorkspace || process.cwd(),
         dshHome,
         mode,
         probeExistingFirst: probeFirst,
+        // 短路/quick 没有试运行实例 ⇒ 用**在飞组合**的注册表诊断顶上（同一判据、来源标注不同）；
+        // 目标 profile 不是本进程时不做（那是别人的组合，问了也不算证据）。
+        ...(profile === 'web' ? { livePresetProbe: () => collectPresetReport(ctx) } : {}),
       })
       const caller = extractCaller(exec)
       recordPreflightInvoked(pr.pass, mode, caller)

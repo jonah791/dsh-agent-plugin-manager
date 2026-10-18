@@ -12,6 +12,7 @@ import { homedir } from 'node:os'
 import { spawn } from 'node:child_process'
 import yaml from 'js-yaml'
 import { runPreflightCore } from 'dsh-agent-preflight/core'
+import type { PresetProbePayload } from 'dsh-agent-preflight/core'
 
 function backupFile(path: string): string | null {
   try {
@@ -248,6 +249,12 @@ export function preflight(opts: {
   mode?: 'full' | 'quick'
   preflightReadyMs?: number
   preflightGraceMs?: number
+  /** 短路/quick 模式下的在飞组合预设诊断（由 web 内的 plugin-manager 供给）。 */
+  livePresetProbe?: () => Promise<PresetProbePayload>
+  /** 试运行额外 CLI 参数（诊断/overlay 用）。 */
+  trialArgs?: readonly string[]
+  /** 试运行内等待预设探针上报的额外窗口（ms）。 */
+  presetProbeWaitMs?: number
   log?: (msg: string) => void
 }): Promise<{ pass: boolean; detail: string }> {
   const { bin, profile, workspace, dshHome } = opts
@@ -272,6 +279,9 @@ export function preflight(opts: {
     preflightReadyMs: opts.preflightReadyMs ?? 90000,
     preflightGraceMs: opts.preflightGraceMs ?? 10000,
     probeExistingFirst: opts.probeExistingFirst ?? false,
+    ...(opts.livePresetProbe !== undefined ? { livePresetProbe: opts.livePresetProbe } : {}),
+    ...(opts.trialArgs !== undefined ? { trialArgs: opts.trialArgs } : {}),
+    ...(opts.presetProbeWaitMs !== undefined ? { presetProbeWaitMs: opts.presetProbeWaitMs } : {}),
     log,
   }, opts.mode ?? 'full').then((r) => {
     if (!r.pass) {

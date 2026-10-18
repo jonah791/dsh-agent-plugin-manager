@@ -3,7 +3,7 @@
   "manifestVersion": "0.1.0",
   "id": "com.jonah791.agent-plugin-manager",
   "name": "dsh-agent-plugin-manager",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "apiVersion": ">=0.1.0 <0.2.0",
   "entrypoints": {
     "host": "lib/fabric.js"
