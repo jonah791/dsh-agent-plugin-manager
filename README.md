@@ -11,7 +11,7 @@
 # dsh-agent-plugin-manager
 
 <p align="center">
-  <a href="https://github.com/jonah791/dsh-agent-plugin-manager"><img src="https://img.shields.io/badge/version-0.2.1-blue" alt="version"></a>
+  <a href="https://github.com/jonah791/dsh-agent-plugin-manager"><img src="https://img.shields.io/badge/version-0.2.2-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
   <img src="https://img.shields.io/badge/tests-179%20passed-brightgreen" alt="tests">
@@ -35,7 +35,7 @@
 | `plugin_unmount` | 卸载：patch 移除 + 依赖移除 + 预检 + 哨兵重启；**保留插件数据目录** |
 | `plugin_start` / `plugin_stop` | 启停插件（patch `disabled` 切换 + 预检 + 哨兵重启） |
 | `plugin_configure` | 更新插件配置（patch `config` **整体替换**）+ 预检 + 哨兵重启 |
-| `preflight_check` | 执行组合试运行预检并落盘「本 web 进程内已调用过」记录；`mode=full`（完整试运行，约 20s）/ `quick`（约 8s） |
+| `preflight_check` | 执行组合试运行预检并落盘「本 web 进程内已调用过」记录；`mode=full`（完整试运行，约 20s）/ `quick`（约 8s）。**2026-10-19 起 PASS 也回逐项读数**：`逐项 N/M ok` + 每项 `✓/✗` 与明细（**红项排在前**，超长截断并标原长）——同一份 `checks` 同时落盘 `<DSH_HOME>/preflight-report.json`（两条路径都写） |
 | `daemon_restart` | 重启 web 守护服务（预检 → kill+重启 → 唤醒 → 清哨兵）；`reason` 必填留痕；**前置门控见下** |
 
 行为侧（无工具）：档案库每次查询**实时**扫描 `self-plugins/*`、各 profile 的 `cordis.patch.yml`、官方 bundles 目录，再用 `ctx.loader.entries()` 对齐挂载状态。
@@ -68,7 +68,7 @@
 
 （四项路径均可留空回退：`selfPluginsDir`/`profilesDir` 回退到 `${DSH_HOME}/` 下同名目录，`bin` 回退 `require.resolve('@deepseek-ai/dsh/lib/bin.js')`，`defaultWorkspace` 回退 `process.cwd()`。**显式配置更清晰**——回退值依赖进程 cwd，非 web profile 下未必是你想要的。）
 
-**3) 30 秒验证**：调 `plugin_list` → 期望返回三条来源分组（自研/官方/非官方）且 `count` 与列表长度一致；再 `plugin_inspect dsh-agent-plugin-manager` → 期望 `ok: true`、`status` 与运行时 loader 一致、`version` 为 `0.2.1`。
+**3) 30 秒验证**：调 `plugin_list` → 期望返回三条来源分组（自研/官方/非官方）且 `count` 与列表长度一致；再 `plugin_inspect dsh-agent-plugin-manager` → 期望 `ok: true`、`status` 与运行时 loader 一致、`version` 为 `0.2.2`。
 
 > 只读面永不抛：单个坏插件（缺 `package.json`、目录不可读）会被逐目录 `try/catch` 跳过，不影响整体返回。
 
@@ -132,7 +132,7 @@ stat -c '%y' self-plugins/dsh-agent-plugin-manager/lib/index.js   # ① 本插�
 
 **生效判据**（三选一，按可靠性排序）：
 
-1. **行为级（最直接）**：本会话工具列表里 11 个工具齐（含 `tool_find`/`preflight_check`/`daemon_restart`）；`plugin_inspect dsh-agent-plugin-manager` 返回 `status: mounted`、`version: 0.2.1`。
+1. **行为级（最直接）**：本会话工具列表里 11 个工具齐（含 `tool_find`/`preflight_check`/`daemon_restart`）；`plugin_inspect dsh-agent-plugin-manager` 返回 `status: mounted`、`version: 0.2.2`。
 2. **证据级**：调 `preflight_check {mode:'quick'}` 前后各 `cat` 一次 `${DSH_HOME}/.preflight-invoked.json`，`atMs` **前进** ⇒ 当前进程在跑本插件（不是「文件里有过记录」）。
 3. **进程级**：`self-plugins/dsh-agent-plugin-manager/lib/index.js` 的 mtime **≤** web 进程启动时刻，且 `src/` 不新于 `lib/`（源码改了没构建 = 跑的还是旧产物）。
 
@@ -159,16 +159,20 @@ stat -c '%y' self-plugins/dsh-agent-plugin-manager/lib/index.js   # ① 本插�
 npm run build && npm test     # test = node --test "tests/*.test.mjs" "test/*.test.mjs"
 ```
 
-**58 例离线测试，全部 pass**（实跑：`# tests 58 / # pass 58 / # fail 0`）。测试**从 `../lib/*.js` 导入**（与运行时同源），所以脚本本身不含 `tsc`——改源码后必须先 `npm run build`，否则跑的是旧产物（假绿陷阱）。
+**215 例离线测试，全部 pass**（实跑 2026-10-19：`# tests 215 / # pass 215 / # fail 0` —— 15 个 `tests/` 文件 **187** 例 + 2 个 `test/` 文件 **28** 例，逐文件复算与总数相等）。测试**从 `../lib/*.js` 导入**（与运行时同源），所以脚本本身不含 `tsc`——改源码后必须先 `npm run build`，否则跑的是旧产物（假绿陷阱）。
+
+下表列**契约性代表文件**（逐文件例数以 `npm test` 实跑输出为准）：
 
 | 文件 | 例数 | 覆盖 |
 |------|------|------|
-| `tests/ops-logic.test.mjs` | 35 | 纯决策逻辑：档案过滤、插件名校验、loader 快照映射、活跃会话挑选、列表渲染、脚手架生成（含空描述/无 `dsh-` 前缀的保守占位）、**工具发现**（匹配分档 · 空 query 概览 · 2 个尸体样本 · 渲染层截断且数据层保真） |
+| `tests/ops-logic.test.mjs` | 43 | 纯决策逻辑：档案过滤、插件名校验、loader 快照映射、活跃会话挑选、列表渲染、脚手架生成（含空描述/无 `dsh-` 前缀的保守占位）、**工具发现**（匹配分档 · 空 query 概览 · 2 个尸体样本 · 渲染层截断且数据层保真）、**预检逐项读数**（`preflightCheckLines`：全绿必须逐项列出 · 先红后绿 · 截断标原长 · 空值显式披露 · 工具必须接同一份纯函数且 PASS 分支拼 note） |
 | `test/preflight-gate.test.mjs` | 14 | **重启闸门**：`decidePreflightGate` 四条判据（未调用 / 预检未过 / 记录不可读 / 时间早于进程启动）+ 调用者提取与比对文案 |
-| `test/registry.test.mjs` | 12 | 档案库：`parsePatchRows`（行解析）、`extractTools`、`isBuilt`、`patchInsert/patchSetDisabled/patchSetConfig/patchRemove` 行编辑、`packageAddLinkDep/packageRemoveDep`、`buildRegistry` 对账 |
+| `test/registry.test.mjs` | 14 | 档案库：`parsePatchRows`（行解析）、`extractTools`、`isBuilt`、`patchInsert/patchSetDisabled/patchSetConfig/patchRemove` 行编辑、`packageAddLinkDep/packageRemoveDep`、`buildRegistry` 对账 |
 | `tests/registry-deps.test.mjs` | 5 | **第三方盘点（§5.23）**：`classifyDependency` 七档（自研 link / 本地 link / 官方 / git pin / tarball / registry / `file:`）、`redactSpec` 脱敏（pin 保留）、`scanThirdParty` 夹具（git-pin 带 `dsh.profile.bundles` ⇒ `bundle=true` 且 `mounted`；registry 未安装 ⇒ `unmounted`、版本留空）、**尸体测试**（profiles 路径不存在 → 空列表不抛） |
 | `tests/third-party-refusal.test.mjs` | 4 | **第三方生命周期拦截（§5.23）**：拒绝文案含名/pin/profile + 两条指路（改 pin、`dsh plugin add/remove`）+ §5.23 依据；`bundle=false` 时不编造 bundle 说明；五个动作（挂载/卸载/启动/停用/配置）动词各异 |
 | `tests/event-log.test.mjs` | 4 | 事件日志薄壳：行格式、**尸体测试**（不可写路径 → 返回 `false` 且**不抛**） |
+
+**其余文件**（2026-10-19 实测例数）：`mcp-check` 21 · `update-check` 16 · `scaffold-peer` 15 · `mcp-io` 14 · `update-io` 11 · `inflight-subagents` 10 · `inflight-session-dirs` 10 · `drift` 13 · `purge-logic` 8 · `redact-config` 7 · `patch-js-tag` 6 ⇒ 合计 131；上表 84 ⇒ **131 + 84 = 215** ✓
 
 **无需网络、无需真实外部依赖**（`pnpm`、`dsh` bin、真实 profile 在测试中都不触碰；临时目录用 `mkdtempSync`）。
 

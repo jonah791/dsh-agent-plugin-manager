@@ -41,6 +41,7 @@ import {
   loaderSnapshotOf,
   peerSatisfactionIssues,
   pickActiveSessionId,
+  preflightCheckLines,
   pluginListLines,
   pluginRowId,
   publicArchive,
@@ -1195,7 +1196,8 @@ export function apply(ctx: Context, config: Config): void {
       mode: { type: 'string', enum: ['full', 'quick'], description: '预检模式（默认 full）' },
       profile: { type: 'string', description: '目标 profile（默认 web）' }
     },
-    output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, pass: { type: 'boolean' }, note: { type: 'string' }, error: { type: 'string' } } }, render: (_a: any, v: any) => [{ type: 'text', text: v.ok ? (v.pass ? '预检通过，已记录（可重启）' : '预检未通过（已记录，重启将被拒绝）：' + (v.note ?? '')) : (v.error ?? '') }] },
+    // 2026-10-19：PASS 也回逐项读数（原先只回一行「通过」⇒「跑过哪几项」不可观察，A17/A20 卡墙）。
+    output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, pass: { type: 'boolean' }, note: { type: 'string' }, error: { type: 'string' } } }, render: (_a: any, v: any) => [{ type: 'text', text: v.ok ? ((v.pass ? '预检通过，已记录（可重启）' : '预检未通过（已记录，重启将被拒绝）') + (v.note ? '\n' + v.note : '')) : (v.error ?? '') }] },
     async execute(args: { mode?: string; profile?: string }, exec) {
       const mode = args.mode === 'quick' ? 'quick' : 'full'
       const profile = args.profile || 'web'
@@ -1221,7 +1223,16 @@ export function apply(ctx: Context, config: Config): void {
       })
       const caller = extractCaller(exec)
       recordPreflightInvoked(pr.pass, mode, caller)
-      return { ok: true, pass: pr.pass, note: (mode + ' 预检 ' + (pr.pass ? 'PASS' : 'FAIL') + '\n调用者: ' + describeCaller(caller) + (pr.pass ? '' : '\n' + pr.detail.slice(0, 600))) }
+      // 2026-10-19：逐项读数进 note（PASS/FAIL 都带）——「跑过哪几项、presets 说什么」当场可读，
+      // 不必再去反解 trace 或读源码（原先 PASS 无明细 ⇒ A17/A20 的读数不可观察）。
+      const checkNames = Object.keys(pr.checks)
+      const okCount = checkNames.filter((k) => pr.checks[k]?.ok).length
+      return { ok: true, pass: pr.pass, note: [
+        '调用者: ' + describeCaller(caller),
+        `逐项 ${okCount}/${checkNames.length} ok` + (pr.pass ? '' : '（红项在前）'),
+        ...preflightCheckLines(pr.checks),
+        ...(pr.pass ? [] : ['失败明细: ' + pr.detail.slice(0, 600)]),
+      ].join('\n') }
     },
   }))
 

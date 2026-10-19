@@ -256,7 +256,7 @@ export function preflight(opts: {
   /** 试运行内等待预设探针上报的额外窗口（ms）。 */
   presetProbeWaitMs?: number
   log?: (msg: string) => void
-}): Promise<{ pass: boolean; detail: string }> {
+}): Promise<{ pass: boolean; detail: string; checks: Record<string, { ok: boolean; detail: string }> }> {
   const { bin, profile, workspace, dshHome } = opts
   const log = opts.log ?? ((msg: string) => { console.error('[plugin-manager:preflight] ' + msg) })
   return runPreflightCore({
@@ -284,25 +284,34 @@ export function preflight(opts: {
     ...(opts.presetProbeWaitMs !== undefined ? { presetProbeWaitMs: opts.presetProbeWaitMs } : {}),
     log,
   }, opts.mode ?? 'full').then((r) => {
+    // 逐项读数投影（2026-10-19）：原先只在 FAIL 时构造明细 ⇒ PASS 时「跑过哪几项」不可观察
+    // （语义文档 A17/A20 两行验收都卡在这堵墙外）。现在两条路径都带回 checks，供工具渲染。
+    const checks: Record<string, { ok: boolean; detail: string }> = Object.fromEntries(
+      Object.entries(r.checks ?? {}).map(([k, c]) => [k, { ok: c.ok === true, detail: String(c.detail ?? '') }]),
+    )
+    // 报告落盘扩面（2026-10-19）：**两条路径都写** —— 原先只在 FAIL 写 fail-report，
+    // PASS 无机器可读留痕（要反解「它到底检查了什么」只能读源码）。判据单一真源：同一份 checks。
+    try {
+      const reportPath = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'preflight-report.json')
+      writeFileSync(reportPath, JSON.stringify({
+        at: new Date().toISOString(), profile, workspace, pass: r.pass, checks,
+      }, null, 2), 'utf-8')
+      if (!r.pass) console.error('[plugin-manager:preflight] 报告已落盘: ' + reportPath)
+    } catch { /* 落盘失败不阻塞 */ }
     if (!r.pass) {
-      const failed = Object.entries(r.checks).filter(([, c]) => !c.ok).map(([k, c]) => `  - ${k}: ${c.detail}`)
+      const failed = Object.entries(checks).filter(([, c]) => !c.ok).map(([k, c]) => `  - ${k}: ${c.detail}`)
       const detail = `预检 FAIL（${profile}）：\n${failed.join('\n') || '（无检查明细）'}`
       console.error('[plugin-manager:preflight] ' + detail.replace(/\n/g, '\n  '))
-      // 自动落盘报告（可查，2026-09-04 主人指示：报错机制完善，避免手动跑）
+      // 失败专用报告保留（2026-09-04 主人指示：报错机制完善，避免手动跑；旧消费方不动）
       try {
-        const reportPath = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'preflight-fail-report.json')
-        writeFileSync(reportPath, JSON.stringify({
-          at: new Date().toISOString(),
-          profile,
-          workspace,
-          pass: false,
-          checks: Object.fromEntries(Object.entries(r.checks).map(([k, c]) => [k, { ok: c.ok, detail: c.detail }])),
+        const failPath = join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'preflight-fail-report.json')
+        writeFileSync(failPath, JSON.stringify({
+          at: new Date().toISOString(), profile, workspace, pass: false, checks,
         }, null, 2), 'utf-8')
-        console.error('[plugin-manager:preflight] 报告已落盘: ' + reportPath)
       } catch { /* 落盘失败不阻塞 */ }
-      return { pass: false, detail }
+      return { pass: false, detail, checks }
     }
-    return { pass: true, detail: '预检 PASS' }
+    return { pass: true, detail: '预检 PASS', checks }
   })
 }
 

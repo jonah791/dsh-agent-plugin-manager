@@ -26,6 +26,7 @@ import {
   findPluginsByToolQuery,
   toolFindLines,
   firstSentence,
+  preflightCheckLines,
 } from '../lib/ops-logic.js'
 
 // ── 行 id 推导（2026-09-26 修「name 双前缀」缺陷的回归判据）──────────
@@ -360,4 +361,53 @@ test('探针上报前缀单一真源：index.ts 必须 import 常量、不得自
     '不得在 index.ts 里再写一份字面量——第二写者＝漂移源（父进程解析不到就成了静默假绿）')
   assert.match(src, /hasUnverifiedBuilds\(dshHome, profile\)/,
     '组合变更检测必须带上 profile（组合面文件按 profile 定位）')
+})
+
+// ── 预检逐项读数（2026-10-19 · A17/A20 的「判据存在但读数不可观察」驱动）────────────
+// 事故形状：原先只在 FAIL 时构造明细、PASS 只回一行「预检通过」⇒ 「它跑过并通过了哪几项」
+// 结构上不可观察（要反解只能读源码或查 trace，而 trace 的 verdict 只记 PASS 字符串）。
+
+test('preflightCheckLines: 全绿也**逐项列出**（「跑过什么」必须可读，不是只回一行「通过」）', () => {
+  const lines = preflightCheckLines({
+    trialRun: { ok: true, detail: '试运行就绪 2.4s' },
+    configParse: { ok: true, detail: '配置文件可解析' },
+    presets: { ok: true, detail: '短路：在飞组合 9 个预设全部可激活（standard / ptc / minimal / …）' },
+  })
+  const text = lines.join('\n')
+  assert.equal(lines.length, 3, '每一项一行，不许折叠成一句摘要')
+  for (const name of ['trialRun', 'configParse', 'presets']) assert.match(text, new RegExp(name), `${name} 必须出现在逐项读数里`)
+  assert.ok(lines.every((l) => l.includes('✓')), '全绿时每行都带 ✓')
+})
+
+test('preflightCheckLines: **先红后绿**，且红里带注册表原因原文（尸体样本：同 scope 重名预设）', () => {
+  const corpse = '试运行实例 有 1 个预设无法激活（新建会话会报 agent-preset/invalid）：· preflight-corpse: '
+    + 'tool-skill-b (@deepseek-ai/dsh-tool-skill): tool "skill" is already registered in this scope'
+  const lines = preflightCheckLines({
+    trialRun: { ok: true, detail: '试运行就绪（旧检出力会把这个组合判 PASS）' },
+    presets: { ok: false, detail: corpse },
+  })
+  assert.ok(lines[0].includes('✗') && lines[0].includes('presets'), '红项必须排第一行——一片 ok 里不许藏一条红')
+  assert.ok(lines[0].includes('already registered in this scope'), '原因原文逐字可见（不是「有 1 项失败」）')
+  assert.ok(lines[1].includes('✓') && lines[1].includes('trialRun'), '绿项仍在（证明是新增检出力，不是重复报旧错）')
+})
+
+test('preflightCheckLines: 超长 detail 截断但**标注原长**（截断不许伪装成完整）', () => {
+  const lines = preflightCheckLines({ presets: { ok: true, detail: 'x'.repeat(500) } }, 120)
+  assert.ok(!lines[0].includes('x'.repeat(200)), '超限部分必须截掉（否则一条读数就能灌满上下文）')
+  assert.match(lines[0], /…（原 500 字符）/, '必须标明原长——否则读者无法知道它被截过')
+})
+
+test('preflightCheckLines: 空/缺失 checks ⇒ **显式披露**，不是静默空数组', () => {
+  for (const input of [undefined, null, {}]) {
+    const lines = preflightCheckLines(input)
+    assert.equal(lines.length, 1)
+    assert.match(lines[0], /无逐项明细/, '「没回报」必须自己说出来（§5.9 规则 2：恒为空不是证据）')
+  }
+})
+
+test('preflight_check 工具接的是同一份纯函数、且 PASS 分支也把 note 拼进 render', () => {
+  const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  assert.match(src, /preflightCheckLines\(pr\.checks\)/, '工具必须用同一份纯函数渲染（判据单一真源）')
+  assert.match(src, /v\.note \? '\\n' \+ v\.note : ''/,
+    'PASS 分支必须拼上 note——否则改了渲染层，模型还是只看到一行「通过」')
 })

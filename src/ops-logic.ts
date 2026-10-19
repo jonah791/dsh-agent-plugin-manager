@@ -701,3 +701,33 @@ export function toolFindLines(hits: ToolFindHit[], query: string): string[] {
   }
   return lines
 }
+
+/** 单条预检读数的投影（`runPreflightCore` 的 `checks` 条目）。 */
+export type PreflightCheck = { ok: boolean; detail: string }
+
+/**
+ * 预检逐项读数的可读行 —— 工具 render 与离线测试**共用同一份文案**（§5.22 判据单一真源）。
+ *
+ * 存在理由（2026-10-19 实测）：原先只在 FAIL 时构造明细，PASS 只回一行「预检通过」
+ * ⇒ **「它跑过并通过了哪几项」不可观察**：语义文档 A17（`configParse` 是否跑过）与
+ * A20（`presets` 读数）两行验收都卡在这堵墙外——**判据存在，读数不可观察**。
+ * 机制必须自证：跑过就报出来（§5.22「能靠外部脚本反解的真相，本应由插件自己说出来」）。
+ *
+ * 排序：**先红后绿**，组内按检查名升序 —— 罚分项先露头，避免「一片 ok 里藏一条红」。
+ * 空输入：输出一行**显式**「（无逐项明细）」——不得静默省略（§5.9 规则 2：恒为空不是证据）。
+ * @param checks - 逐项读数（检查名 → {ok, detail}）；undefined/null/空对象 ⇒ 返回披露行。
+ * @param maxDetail - 每条 detail 的字符上限（超出以 … 收尾并标原长）。
+ * @returns 行数组（每行已带缩进与 ✓/✗ 前缀）。
+ */
+export function preflightCheckLines(
+  checks: Record<string, PreflightCheck> | undefined | null,
+  maxDetail = 200,
+): string[] {
+  const entries = Object.entries(checks ?? {})
+  if (entries.length === 0) return ['  （无逐项明细：本次预检未回报 checks）']
+  const cut = (s: string): string => (s.length > maxDetail ? `${s.slice(0, maxDetail)}…（原 ${s.length} 字符）` : s)
+  // 先红后绿：ok 相等的按名字升序；不等的把 !ok 排前（-1）。
+  const order = (a: [string, PreflightCheck], b: [string, PreflightCheck]): number =>
+    (a[1].ok === b[1].ok ? 0 : a[1].ok ? 1 : -1) || a[0].localeCompare(b[0])
+  return entries.sort(order).map(([name, c]) => `  ${c.ok ? '✓' : '✗'} ${name}: ${cut(String(c.detail ?? ''))}`)
+}
