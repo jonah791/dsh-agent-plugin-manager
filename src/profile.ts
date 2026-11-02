@@ -72,9 +72,13 @@ export function patchRemove(profileDir: string, id: string): { bak: string | nul
       out.push(line)
       continue
     }
-    // 跳过中：遇到下一个顶层条目（缩进 <= 2 的 "- "）结束跳过
+    // 跳过中：遇到「回到目标条目同级或更浅」的 "- " 结束跳过
     const nm = line.match(/^(\s*)- /)
-    if (nm && (nm[1] ?? '').length <= 2) {
+    // ⚠ 2026-11-02 修正：原写死 `<= 2`。在 `- insert:` 容器里兄弟条目的缩进是 4（>2）
+    // ⇒ 永不退出跳过态 ⇒ 把目标之后的所有同级兄弟一起删掉，而函数返回 removed=true。
+    // 实测（真实 web profile，132 对同级兄弟）：旧逻辑误删 98 对（74%）。同一缺陷在
+    // manor-plugin-admin 的 removeRow 里也存在（已一并修）。
+    if (nm && (nm[1] ?? '').length <= idIndent) {
       skipping = false
       out.push(line)
     } else if (/^\s*- id:/.test(line)) {
@@ -220,7 +224,12 @@ export function packageRemoveDep(profileDir: string, depName: string): { bak: st
 /** pnpm install（copy 导入方式，绕开 Windows rename EPERM）。 */
 export function installProfile(profileDir: string, timeoutMs = 600000): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolvePromise) => {
-    const child = spawn('pnpm', ['install', '--package-import-method=copy'], { cwd: profileDir, shell: true })
+    const child = spawn('pnpm', ['install', '--package-import-method=copy'], {
+      cwd: profileDir,
+      shell: true,
+      // ⚠ Windows 上 shell:true 会经 cmd.exe 起进程，不隐藏就弹黑框（2026-10-21 主人反馈「启动和重启时有个空窗口」时一并修）。
+      windowsHide: true,
+    })
     let output = ''
     child.stdout.on('data', (d: Buffer) => { output += d })
     child.stderr.on('data', (d: Buffer) => { output += d })
