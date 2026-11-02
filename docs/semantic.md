@@ -44,7 +44,7 @@
 
 ```
 爱丽丝（模型）
-  │ 11 个工具（plugin_* / plugin_audit / preflight_check / daemon_restart）
+  │ 14 个工具（plugin_* / tool_find / plugin_audit / plugin_spec_check / preflight_check / daemon_restart）
   ▼
 src/index.ts:apply
   ├─ createOps(...)  ──→  src/registry.ts  扫描 self-plugins + profiles/*/cordis.patch.yml + 官方 bundles
@@ -57,6 +57,8 @@ src/index.ts:apply
   ├─ 档案投影（plugin_list/plugin_inspect 出口）：ops-logic.ts:publicArchive → redact-config.ts:redactConfig(config)
   │     └─ 键名命中 token/secret/password/api key/webhook/chat id… ⇒ 值替换为 '[redacted]'（I7）
   ├─ plugin_audit 工具：drift.ts:detectDrift(档案) → 「自述 vs 档案事实」漂移清单（只读，I8）
+  ├─ plugin_spec_check 工具：对 self-plugins 下每个插件跑**九项机械判据**（ESM 无例外 / 入口不指源码 / 宿主包不在 dependencies / bundle patch 存在 / 有 lib 产物…），只读；`only` 可只看一个插件
+  ├─ tool_find 工具：从插件档案按关键词找工具（**插件名 / 用途 / 工具名**三处匹配），答「我要做 X，该用哪个工具」；零手写映射（只用档案真源，不维护意图→域对照表）
   ├─ triggerReload(note, caller) → 绑定**触发者会话**（exec.agent 且为 session-* ⇒ 用它；否则回退活跃会话并留 trigger= 标记）
   │     └─ src/sentinel.ts:writeSentinel(<DSH_HOME>/.hot-reload-flag)
   ├─ .plugin-manager-events.log 追加事件行（侧车轨迹，供并行实例协调）
@@ -158,7 +160,7 @@ client（浏览器）：src/client/index.ts ──$mount──→ remote.ts（TY
 
 **生效判据（改代码后怎么证明真的生效）**：
 1. **产物比进程新**：`self-plugins/dsh-agent-plugin-manager/lib/index.js` 的 mtime **晚于**当前 web 进程启动时刻（§5.11 进程级判据；`preflight_check` 的 `hasUnverifiedBuilds()` 用同一口径）。
-2. **工具面在场**：本会话工具列表能列出 10 个工具（含 `preflight_check`/`daemon_restart`）；`plugin_inspect dsh-agent-plugin-manager` 返回 `status: mounted`、`version 0.1.1`。
+2. **工具面在场**：本会话工具列表能列出 **14 个**工具（含 `tool_find` / `plugin_spec_check` / `preflight_check` / `daemon_restart`）；`plugin_inspect dsh-agent-plugin-manager` 返回 `status: mounted`、`version 0.1.1`。
 3. **行为可答**：`plugin_list` 返回三条来源分组（自研/官方/非官方）；`preflight_check {mode:'quick'}` 返回 `pass` 且 `<DSH_HOME>/.preflight-invoked.json` 的 `atMs` **前进**（这是「我的调用落了盘」的物证）。
 4. **闸门可证伪**：未预检时调 `daemon_restart` → 必须被拒绝，且 `.plugin-manager-events.log` 出现 `daemon_restart 门控证据：… 结论=拒绝` 行。
 
