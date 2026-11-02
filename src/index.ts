@@ -22,6 +22,9 @@ import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-session'
 import { buildRegistry, alignWithLoader, readPatch, parsePatchRows, type PluginArchive } from './registry.ts'
 import { detectDrift } from './drift.ts'
+// 规范自检（2026-10-30）：判据纯函数在 spec-check.ts，磁盘采集在 spec-scan.ts
+import { checkPluginSpec, summarizeSpec, formatSpecReport } from './spec-check.ts'
+import { scanSelfPlugins } from './spec-scan.ts'
 import { patchInsert, patchRemove, patchSetDisabled, patchSetConfig, packageAddLinkDep, packageRemoveDep, installProfile, preflight, rollbackFile } from './profile.ts'
 // 预设探针的上报前缀/载荷类型与预检共享（单一真源：父进程按同一常量解析试运行输出）
 import { PRESET_PROBE_PREFIX, type PresetProbePayload } from 'dsh-agent-preflight/core'
@@ -332,7 +335,7 @@ function dirSizeBytes(dir: string): number {
 /** 主仓索引里该路径的 git mode（160000=gitlink；null=未纳管）。 */
 function gitIndexMode(cwd: string, rel: string): string | null {
   try {
-    const out = execFileSync('git', ['ls-files', '-s', rel], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    const out = execFileSync('git', ['ls-files', '-s', rel], { windowsHide: true, cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
     const first = out.split('\n').find(l => l.trim() !== '')
     return first === undefined ? null : first.split(/\s+/)[0] ?? null
   } catch {
@@ -1027,6 +1030,47 @@ export function apply(ctx: Context, config: Config): void {
       const archives = args.only ? all.filter((a) => a.name === args.only) : all
       const findings = detectDrift(archives).map((f) => `⚠ ${f.name} · ${f.kind} — ${f.detail}`)
       return { ok: true, count: findings.length, findings }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'plugin_spec_check',
+    description: '自研插件规范自检（只读）：对 self-plugins 下每个插件跑九项机械判据——ESM 无例外 / 入口不指源码 / 宿主包不在 dependencies / bundle patch 文件存在 / 有测试 / README ≥200B / lib 存在 / lib 不旧于 src。**边界写在输出里**：DEFAULT_* 调参、waterfall 是否调 next()、disposer 齐全、branded id、Host-Client 面分离、Model-visible ⟺ logged 六项不在覆盖范围内——它们的「零命中」不代表合规。',
+    parameters: { only: { type: 'string', description: '只看某个插件（可选）' } },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          scanned: { type: 'number' },
+          clean: { type: 'number' },
+          count: { type: 'number' },
+          parseErrors: { type: 'array', items: { type: 'string' } },
+          report: { type: 'string' },
+        },
+      },
+      // render 签名与同文件 plugin_audit 保持一致（defineTool 的 render 参数未窄化）
+      render: (_a: any, v: any) => [{
+        type: 'text',
+        text: (v.parseErrors?.length ? `⚠ 解析失败 ${v.parseErrors.length} 个：\n${v.parseErrors.join('\n')}\n\n` : '') + v.report,
+      }],
+    },
+    async execute(args: { only?: string }) {
+      const results = scanSelfPlugins(config.selfPluginsDir || join(dshHome, 'self-plugins'))
+      const targets = args.only ? results.filter((r) => r.name === args.only) : results
+      const parseErrors = targets.filter((r) => 'parseError' in r).map((r) => `${r.name}: ${(r as { parseError: string }).parseError}`)
+      const rows = targets
+        .filter((r): r is { name: string; input: import('./spec-check.ts').PluginSpecInput } => 'input' in r)
+        .map((r) => ({ name: r.name, issues: checkPluginSpec(r.input) }))
+      const summary = summarizeSpec(rows)
+      return {
+        ok: true,
+        scanned: summary.scanned,
+        clean: summary.clean,
+        count: summary.rows.length,
+        parseErrors,
+        report: formatSpecReport(summary),
+      }
     },
   }))
 

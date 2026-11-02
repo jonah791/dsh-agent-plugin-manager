@@ -24,9 +24,34 @@ export interface DriftFinding {
   detail: string
 }
 
-/** 从 purpose 文本里抠出「N 个工具 / N tools」的声明数；抠不到返回 null（不猜）。 */
+/**
+ * 合并史形态：「N 工具 → M」——取箭头后的 M，不取 N。
+ *
+ * 为什么需要（2026-10-30 实测）：三个合并过的插件都把合并史写进描述，形如
+ * 「替换 dsh-red-team + …（36 工具 → 12）」。旧实现取第一个数字，于是把**合并前**
+ * 的历史数当成**当前**工具数，对 `dsh-engagement`（36→12）与 `dsh-identity-loop`（16→7）
+ * 各报一条假漂移。
+ *
+ * 修装置而不是改描述：判据应当读懂它读的那句话。「A → B」在中文里是「从 A 变成 B」，
+ * B 是现在；逼所有人把正确数挪到第一个位置，是把装置的理解缺陷转嫁成写作约束。
+ */
+function declaredToolCountAfterArrow(purpose: string): number | null {
+  const m = /(\d+)\s*(?:个|款)?\s*(?:工具|tools?)\s*(?:→|->|=>|变为|变成|合并为|降为|缩减为)\s*(\d+)/i.exec(purpose)
+  if (!m || m[2] === undefined) return null
+  const n = Number(m[2])
+  return Number.isFinite(n) ? n : null
+}
+
+/**
+ * 从 purpose 文本里抠出「N 个工具 / N tools」的声明数；抠不到返回 null（不猜）。
+ *
+ * @param purpose 插件档案的用途描述（来自 package.json 的 description）
+ * @returns 自述的工具数；无声明或形态不认识时为 null
+ */
 export function declaredToolCount(purpose: string): number | null {
   if (!purpose) return null
+  const afterArrow = declaredToolCountAfterArrow(purpose)
+  if (afterArrow !== null) return afterArrow
   const m = /(\d+)\s*(?:个|款)?\s*(?:工具|tools?)/i.exec(purpose)
   if (!m || m[1] === undefined) return null
   const n = Number(m[1])

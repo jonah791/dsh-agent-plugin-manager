@@ -86,3 +86,35 @@ test('未声明的零工具 ⇒ 仍要报（不能靠沉默过关）', () => {
   const f = detectDrift([arch({ name: 'dsh-x', purpose: '某插件：做点事', tools: [] })])
   assert.ok(f.some((x) => x.kind === 'tools-zero-unclaimed'))
 })
+
+// ── 合并史形态（2026-10-30 实测：三个合并过的插件都写「（N 工具 → M）」，旧实现取 N ⇒ 假漂移） ──
+
+test('合并史「36 工具 → 12」⇒ 取箭头后的 12（旧实现取 36，对 dsh-engagement 报假漂移）', () => {
+  assert.equal(declaredToolCount('安全交战闭环：…替换 5 个插件（36 工具 → 12）。'), 12)
+})
+
+test('尸体测试：合并史与事实一致 ⇒ 不得报警', () => {
+  const f = detectDrift([arch({
+    name: 'dsh-engagement',
+    purpose: '安全交战闭环：…替换 dsh-red-team + …（36 工具 → 12）。',
+    tools: Array.from({ length: 12 }, (_, i) => `eng_t${i}`),
+  })])
+  assert.deepEqual(f, [])
+})
+
+test('修装置不能放过真漂移：合并史写的 12 但实际 3 ⇒ 仍报 mismatch', () => {
+  const f = detectDrift([arch({ name: 'x', purpose: '合并后（36 工具 → 12）', tools: ['a', 'b', 'c'] })])
+  assert.ok(f.some((x) => x.kind === 'tool-count-mismatch'))
+})
+
+test('箭头形态的其它写法都认：英文 -> / 变为 / 合并为 / 降为', () => {
+  assert.equal(declaredToolCount('merged from 5 plugins (36 tools -> 12)'), 12)
+  assert.equal(declaredToolCount('某插件（36 工具变为 12）'), 12)
+  assert.equal(declaredToolCount('由 36 个工具合并为 12'), 12)
+  assert.equal(declaredToolCount('某插件（36 工具降为 12）'), 12)
+})
+
+test('无箭头形态时行为不变：仍取第一个「N 工具」', () => {
+  assert.equal(declaredToolCount('插件管理器：… 含 9 工具 + 生命周期管理'), 9)
+})
+

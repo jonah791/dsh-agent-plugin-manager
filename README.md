@@ -2,7 +2,7 @@
   DSH 插件生态公约声明（plugin-ecosystem-convention · 组合优先/声明清晰/兼容优先）
   purpose: 插件管理器：插件档案库（来源/版本/用途/工具/挂载状态/配置摘要）+ 生命周期管理（创建/挂载/启停/卸载/改配置）+ 重启闸门（preflight_check / daemon_restart）。
   inject: 'tools','loader','sessions'（host）；client 侧 inject = 'slots','remote'
-  tools: plugin_list,tool_find,plugin_inspect,plugin_create,plugin_mount,plugin_unmount,plugin_start,plugin_stop,plugin_configure,preflight_check,daemon_restart（共 11 个）
+  tools: plugin_list,tool_find,plugin_inspect,plugin_audit,plugin_spec_check,plugin_update_check,plugin_mcp_check,plugin_create,plugin_mount,plugin_unmount,plugin_purge,plugin_configure,preflight_check,daemon_restart（共 14 个）
   runtime: host + client（GUI 槽位已于 2026-09-13 撤除，界面迁至 dsh-panel 宿主的 plugin-manager 面板；本插件保留 $mount 与 typert remote）
   envDeps: pnpm CLI（挂载/卸载时 spawn install）、@deepseek-ai/dsh/lib/bin.js（试运行入口）、js-yaml、link 依赖 dsh-agent-preflight（预检本体）
   boundary: 能力边界 ≠ 沙箱——有权限的调用方仍能改任意 profile 文件；本插件只保证「改前必备份、失败即回滚、预检不过不重启」；不 kill/spawn web 进程（那属 watch 侧）
@@ -11,7 +11,7 @@
 # dsh-agent-plugin-manager
 
 <p align="center">
-  <a href="https://github.com/jonah791/dsh-agent-plugin-manager"><img src="https://img.shields.io/badge/version-0.2.2-blue" alt="version"></a>
+  <a href="https://github.com/jonah791/dsh-agent-plugin-manager"><img src="https://img.shields.io/badge/version-0.3.0-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
   <img src="https://img.shields.io/badge/tests-179%20passed-brightgreen" alt="tests">
@@ -23,17 +23,21 @@
 
 ## 能力
 
-**工具面 11 个**（名称逐字来自 `src/index.ts` 的 `defineTool({ name })`）：
+**工具面 14 个**（名称逐字来自 `src/index.ts` 的 `ctx.tools.register(defineTool({ name }))`；改工具面时**必须同步改这里与 `package.json` 的 description**——两处都是自述源，2026-10-30 实测它们各自漂移过：description 写着 9、README 写着 11 且其中两个工具根本不存在）：
 
 | 工具 | 用途 |
 |------|------|
 | `plugin_list` | 列出全部插件档案（来源/版本/用途/工具/挂载状态/配置摘要）——按「自研 / 官方 / 非官方」分组；可按 `source`（`self`/`official`/`third-party`）/ `status`（`mounted`/`disabled`/`unmounted`）过滤 |
 | `tool_find` | **工具发现**：从档案里按关键词找工具——答「我要做 X，该用哪个工具」。无 `query` ⇒ 全域概览（域 + 工具数）；有 `query` ⇒ 在**插件名 / 用途 / 工具名**三处匹配，命中工具名则只列命中的。**零手写映射**（只用档案真源，不维护「意图→域」对照表）；无命中时显式标注这是**有界搜索**——「没找到」**不等于**「能力不存在」 |
 | `plugin_inspect` | 单个插件的深度档案（用途/工具/配置/挂载详情） |
+| `plugin_audit` | **档案漂移审计**（只读）：比对「自述」与「档案事实」——自述工具数 ≠ 清单长度 / 声称有工具但清单为空 / 无用途描述 / 声明挂载但未构建 / 挂载零工具未声称。边界：看不见运行时真实工具面 |
+| `plugin_spec_check` | **规范自检**（只读）：对 `self-plugins` 每个插件跑九项机械判据（ESM / 入口不指源码 / 宿主包不在 dependencies / bundle patch 存在 / 有测试 / README ≥200B / lib 存在 / lib 不旧于 src）。**输出里带未覆盖范围**——`DEFAULT_*` 调参、waterfall 是否调 `next()`、disposer 齐全、branded id、Host-Client 面分离、Model-visible ⟺ logged 六项不在覆盖内，「零命中」不代表合规 |
+| `plugin_update_check` | 第三方插件上游更新检查（只读）：六档互不掩盖——有更新 / 已最新 / 不可比 / 无上游源 / 查询失败 / 已跳过。网络失败绝不读成「没更新」 |
+| `plugin_mcp_check` | MCP 服务器专项体检（只读）：四档健康——`active` / `disabled-in-patch` / `denied-runtime`（配置启用但被兼容性预检静默停用）/ `unknown`；并标出浮动版本 |
 | `plugin_create` | 创建新插件脚手架：在 self-plugins 生成 `package.json`/`tsconfig.json`/`src/index.ts`/`README.md`，随后可 `plugin_mount` 挂载 |
 | `plugin_mount` | 挂载到 profile：写 link 依赖 + `pnpm install` + patch insert + 沙盒预检 + 哨兵重启（全自动闭环） |
 | `plugin_unmount` | 卸载：patch 移除 + 依赖移除 + 预检 + 哨兵重启；**保留插件数据目录** |
-| `plugin_start` / `plugin_stop` | 启停插件（patch `disabled` 切换 + 预检 + 哨兵重启） |
+| `plugin_purge` | **彻底退役**：先出影响面，再执行——插件目录**移入** `${DSH_HOME}/archive/plugin-purge/`（不物理删除，可回退）+ 留痕；语义注册表与文档引用**只报告不改**。**默认干跑** |
 | `plugin_configure` | 更新插件配置（patch `config` **整体替换**）+ 预检 + 哨兵重启 |
 | `preflight_check` | 执行组合试运行预检并落盘「本 web 进程内已调用过」记录；`mode=full`（完整试运行，约 20s）/ `quick`（约 8s）。**2026-10-19 起 PASS 也回逐项读数**：`逐项 N/M ok` + 每项 `✓/✗` 与明细（**红项排在前**，超长截断并标原长）——同一份 `checks` 同时落盘 `<DSH_HOME>/preflight-report.json`（两条路径都写） |
 | `daemon_restart` | 重启 web 守护服务（预检 → kill+重启 → 唤醒 → 清哨兵）；`reason` 必填留痕；**前置门控见下** |
@@ -68,7 +72,7 @@
 
 （四项路径均可留空回退：`selfPluginsDir`/`profilesDir` 回退到 `${DSH_HOME}/` 下同名目录，`bin` 回退 `require.resolve('@deepseek-ai/dsh/lib/bin.js')`，`defaultWorkspace` 回退 `process.cwd()`。**显式配置更清晰**——回退值依赖进程 cwd，非 web profile 下未必是你想要的。）
 
-**3) 30 秒验证**：调 `plugin_list` → 期望返回三条来源分组（自研/官方/非官方）且 `count` 与列表长度一致；再 `plugin_inspect dsh-agent-plugin-manager` → 期望 `ok: true`、`status` 与运行时 loader 一致、`version` 为 `0.2.2`。
+**3) 30 秒验证**：调 `plugin_list` → 期望返回三条来源分组（自研/官方/非官方）且 `count` 与列表长度一致；再 `plugin_inspect dsh-agent-plugin-manager` → 期望 `ok: true`、`status` 与运行时 loader 一致、`version` 为 `0.3.0`。
 
 > 只读面永不抛：单个坏插件（缺 `package.json`、目录不可读）会被逐目录 `try/catch` 跳过，不影响整体返回。
 
@@ -132,7 +136,7 @@ stat -c '%y' self-plugins/dsh-agent-plugin-manager/lib/index.js   # ① 本插�
 
 **生效判据**（三选一，按可靠性排序）：
 
-1. **行为级（最直接）**：本会话工具列表里 11 个工具齐（含 `tool_find`/`preflight_check`/`daemon_restart`）；`plugin_inspect dsh-agent-plugin-manager` 返回 `status: mounted`、`version: 0.2.2`。
+1. **行为级（最直接）**：本会话工具列表里 14 个工具齐（含 `tool_find`/`preflight_check`/`daemon_restart`）；`plugin_inspect dsh-agent-plugin-manager` 返回 `status: mounted`、`version: 0.3.0`。
 2. **证据级**：调 `preflight_check {mode:'quick'}` 前后各 `cat` 一次 `${DSH_HOME}/.preflight-invoked.json`，`atMs` **前进** ⇒ 当前进程在跑本插件（不是「文件里有过记录」）。
 3. **进程级**：`self-plugins/dsh-agent-plugin-manager/lib/index.js` 的 mtime **≤** web 进程启动时刻，且 `src/` 不新于 `lib/`（源码改了没构建 = 跑的还是旧产物）。
 

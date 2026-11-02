@@ -49,7 +49,7 @@ function unloadedFromLog() {
 /** 主仓中该路径的 git mode（160000=gitlink / 040000=目录 / null=未跟踪）。 */
 function gitMode(rel) {
   try {
-    const out = execFileSync('git', ['ls-files', '-s', rel], { cwd: REPO, encoding: 'utf8' })
+    const out = execFileSync('git', ['ls-files', '-s', rel], { windowsHide: true, cwd: REPO, encoding: 'utf8' })
     const first = out.split('\n').find(l => l.trim() !== '')
     return first ? first.split(/\s+/)[0] : null
   } catch { return null }
