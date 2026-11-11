@@ -208,18 +208,25 @@ export function describeInFlightSessions(list: readonly InFlightSession[]): stri
 }
 
 /** loader 条目（cordis loader 的鸭子类型）。 */
-export type LoaderEntryLike = { options?: { name?: string }; disabled?: boolean }
+export type LoaderEntryLike = { options?: { name?: string; id?: string }; disabled?: boolean }
 
 /**
  * loader 快照（原 `loaderSnapshot`）：
  * **loader 是挂载状态的权威**（不吃陈旧 system-state 静态快照）；无名条目丢弃，
  * `disabled === true` 才算停用（其他值/缺失一律视为启用——保守按「在跑」呈现）。
+ *
+ * ⚠ 必须把 `options.id` 一起带出（2026-11-12 · 台账 lh-bfd83116）：`options.name` 在 patch 里
+ * **不是唯一键**（两行同 name、不同 id 是合法且实际存在的形态），只带 name 会让下游按 name
+ * 折叠时后写覆盖 ⇒ 读数指向另一行。id 是这里唯一正确的匹配键。
  */
-export function loaderSnapshotOf(entries: Iterable<LoaderEntryLike>): { name: string; enabled: boolean }[] {
-  const out: { name: string; enabled: boolean }[] = []
+export function loaderSnapshotOf(entries: Iterable<LoaderEntryLike>): { name: string; id?: string; enabled: boolean }[] {
+  const out: { name: string; id?: string; enabled: boolean }[] = []
   for (const entry of entries) {
     const n = entry.options?.name
-    if (typeof n === 'string' && n) out.push({ name: n, enabled: entry.disabled !== true })
+    if (typeof n === 'string' && n) {
+      const id = entry.options?.id
+      out.push({ name: n, ...(typeof id === 'string' && id !== '' ? { id } : {}), enabled: entry.disabled !== true })
+    }
   }
   return out
 }
@@ -236,6 +243,11 @@ export function publicArchive(a: PluginArchive) {
     tools: a.tools, built: a.built,
     status: a.status, profiles: a.profiles,
     config: redactConfig(a.config),
+    // patch 行身份（2026-11-12 · 台账 lh-bfd83116）：**同名多行按 name 查会指向别的行**，
+    // 所以输出里必须同时有 id 与逐行的 id/disabled —— 否则读者无从判断读到的是哪一行。
+    ...(a.id === undefined ? {} : { id: a.id }),
+    ...(a.patchRows === undefined ? {} : { patchRows: a.patchRows }),
+    ...(a.ambiguity === undefined ? {} : { ambiguity: a.ambiguity }),
     // 第三方档专有（§5.23）：bundle = 自述式挂载；spec = 依赖声明（含 pin，落盘前已脱敏）
     // 注：不投影 `path`（本地绝对路径不属工具面白名单）
     ...(a.bundle === undefined ? {} : { bundle: a.bundle }),

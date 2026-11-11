@@ -59,6 +59,7 @@ export function patchRemove(profileDir: string, id: string): { bak: string | nul
   let removed = false
   let sawOtherId = false
   let idIndent = 0
+  let idLineStart = -1
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] ?? ''
     if (!skipping) {
@@ -67,6 +68,7 @@ export function patchRemove(profileDir: string, id: string): { bak: string | nul
         skipping = true
         removed = true
         idIndent = (m[1] ?? '').length
+        idLineStart = i
         continue
       }
       out.push(line)
@@ -87,7 +89,20 @@ export function patchRemove(profileDir: string, id: string): { bak: string | nul
   }
   if (!removed) return { bak, removed: false }
   // insert 块内且无其他条目：删除块头空壳（- insert:）
-  if (!sawOtherId && idIndent > 2) {
+  // ⚠ 判「这条 id 是否住在 `- insert:` 容器里」必须看结构，不能看「缩进 > 2」这个常数：
+  //   ① 容器里也可以写成与 `- insert:` 同缩进的 `- id:`（合法 YAML，indent 2）⇒ 常数会漏
+  //   ② 顶层也可能出现 indent 2 的列表项 ⇒ 常数会误判
+  // ⇒ 往回找最近一条比它更浅的行，看它是不是 `- insert:`。
+  const inInsertContainer = (): boolean => {
+    for (let k = idLineStart - 1; k >= 0; k -= 1) {
+      const l = lines[k] ?? ''
+      if (l.trim() === '' || l.trimStart().startsWith('#')) continue
+      const ind = (l.match(/^(\s*)/)?.[1] ?? '').length
+      if (ind < idIndent) return /^-\s*insert:\s*$/.test(l.trim())
+    }
+    return false
+  }
+  if (!sawOtherId && inInsertContainer()) {
     const last = out[out.length - 1] ?? ''
     if (/^-\s*insert:/.test(last.trimStart())) out.pop()
   }

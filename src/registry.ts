@@ -12,6 +12,26 @@ export type PluginSource = 'self' | 'official' | 'third-party'
 export type PluginStatus = 'mounted' | 'disabled' | 'unmounted'
 
 /**
+ * patch 中命中某个档案的一行（**同名多行场景的唯一真源**）。
+ *
+ * 为什么必须带 `id`（2026-11-12 根因，台账 lh-bfd83116）：
+ * `name` **不是唯一键**——实测 web profile 的 `cordis.patch.yml` 有两行
+ * `name: 'ds-harness-remote'`、id 分别是 `ds-harness-remote`（host，`disabled: false`）与
+ * `ds-harness-remote-tui`（tui，`disabled: true`）。档案按 name 折叠、loader 快照也按 name
+ * 折叠（后者 `Map.set` 后写覆盖）⇒ `plugin_inspect({name:'ds-harness-remote'})` 读出
+ * `disabled`，而 host 版一直在跑。同一个错读数骗过两次（10-31、11-08）。
+ * ⇒ 凡按 name 折叠的地方都必须**能看见 id 与各自的 disabled**，否则读数静默指向别的行。
+ */
+export interface PatchRowRef {
+  /** patch 行 id（**唯一键**）。 */
+  id: string
+  /** 该行所在 profile。 */
+  profile: string
+  /** 该行是否 disabled（布尔，与 parsePatchRows 口径一致）。 */
+  disabled: boolean
+}
+
+/**
  * 来源分组（主人 2026-08-27 定调：自研 / 非自研，非自研下分官方 / 非官方）：
  * - self = 自研（self-plugins 目录）
  * - official = 非自研·官方（@deepseek-ai/*）
@@ -44,6 +64,12 @@ export interface PluginArchive {
   bundle?: boolean
   /** 第三方专用：依赖声明原文（含 pin；**已脱敏**）——升级/回退靠它。 */
   spec?: string
+  /** 本档案唯一对应的 patch 行 id（**同名多行时缺省**——那就看 `patchRows` 与 `ambiguity`）。 */
+  id?: string
+  /** patch 中命中本档案的全部行（每行带 id 与各自 disabled）。空/缺省 = patch 里没有行。 */
+  patchRows?: PatchRowRef[]
+  /** 同名多行且启停不一致 ⇒ 非空（含各 id 与状态）。**读到它就不能再按单行下结论**。 */
+  ambiguity?: string
 }
 
 /**
@@ -187,7 +213,67 @@ export function parsePatchRows(patchText: string): PatchRow[] {
   return rows
 }
 
-/** 递归收集 src/ 与 lib/ 下的源码文件（工具可拆分到任意文件，如 lib/tools.js、src/pruner.ts）。 */
+/**
+ * 收集 patch 里**命中某档案名**的全部行（按 id 或 name 双认，与 findRow / findArchive 同口径）。
+ *
+ * 与旧写法（`rows.find(...)`）的唯一区别就是**不丢行**：同名多行时 `.find` 只给第一行，
+ * 而第一行是谁取决于文件里的书写顺序 ⇒ 读数随排版漂移，且看不出漂移（静默）。
+ *
+ * 去重：同一 (id, profile) 只留一条（多 profile 扫描时同名行会重复出现）。
+ */
+export function collectPatchRows(profiles: readonly ProfilePatchInfo[], name: string): PatchRowRef[] {
+  const seen = new Set<string>()
+  const out: PatchRowRef[] = []
+  for (const info of profiles) {
+    for (const r of info.rows) {
+      if (r.id !== name && r.name !== name) continue
+      const key = r.id + '\u0000' + info.profile
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ id: r.id, profile: info.profile, disabled: r.disabled === true })
+    }
+  }
+  return out
+}
+
+/**
+ * 从 patch 行推导启停状态；**同名多行且状态冲突时不猜**，而是返回 `ambiguity` 让人改用 id。
+ *
+ * 语义（刻意如此，不是「取最宽松/最严格」的折衷）：
+ *  · 只有一个 distinct id ⇒ 该 id 各 profile 的**后写覆盖**（与原 status 覆盖行为一致，不改既有语义）；
+ *  · 多个 distinct id 且状态**一致** ⇒ 该状态（不制造假歧义）；
+ *  · 多个 distinct id 且状态**不一致** ⇒ `status` 取「有一行在跑 ⇒ 在跑」（这是运行时事实），
+ *    并附 `ambiguity` 文案逐条列出 id 与状态 —— **读数不再静默指向某一行**。
+ *
+ * @param name - 档案名（用于文案）。
+ * @param rows - `collectPatchRows` 的结果。
+ * @returns `null` = 没有行（调用方保留自己的兜底逻辑）。
+ */
+export function resolvePatchStatus(
+  name: string,
+  rows: readonly PatchRowRef[],
+): { status: PluginStatus; ambiguity?: string } | null {
+  if (rows.length === 0) return null
+  const byId = new Map<string, boolean>()
+  for (const r of rows) byId.set(r.id, r.disabled)
+  const states = [...byId.entries()]
+  if (states.length === 1) {
+    const only = states[0]
+    return { status: only !== undefined && only[1] ? 'disabled' : 'mounted' }
+  }
+  const enabledIds = states.filter(([, d]) => !d).map(([id]) => id)
+  const disabledIds = states.filter(([, d]) => d).map(([id]) => id)
+  if (enabledIds.length === 0) return { status: 'disabled' }
+  if (disabledIds.length === 0) return { status: 'mounted' }
+  return {
+    status: 'mounted',
+    ambiguity: `${name} 命中 ${states.length} 行且启停不一致`
+      + `（启用: ${enabledIds.join(', ')} · 停用: ${disabledIds.join(', ')}）`
+      + '——按 name 查有歧义，请用 id',
+  }
+}
+
+
 function collectSourceFiles(dir: string): string[] {
   const out: string[] = []
   const walk = (d: string): void => {
@@ -624,31 +710,90 @@ export function buildRegistry(selfPluginsDir: string, profilesDir: string): Plug
     if (st === 'enabled') { arch.status = 'mounted'; if (!arch.profiles.includes('web')) arch.profiles.push('web') }
     else if (st === 'disabled') arch.status = 'disabled'
   }
+  // ── 同名多行的读数修正（2026-11-12 · 台账 lh-bfd83116）────────────────────
+  // 上面各扫描器都用 `rows.find(...)` 取**第一行**——同名多行时「第一行是谁」取决于文件书写顺序，
+  // 读数会随排版漂移且看不出来。这里统一补三件事：① `patchRows` 逐行列出（id + 各自 disabled）
+  // ② `id` ③ 状态冲突时 `ambiguity` 文案（**不静默**）。
+  // 放在 systemState 覆盖之后：这三项是文件事实，比快照更硬，且没有别的环节会写它们。
+  for (const arch of all) {
+    const rows = collectPatchRows(profiles, arch.name)
+    if (rows.length === 0) continue
+    arch.patchRows = rows
+    const ids = [...new Set(rows.map((r) => r.id))]
+    const only = ids.length === 1 ? ids[0] : undefined
+    if (only !== undefined) {
+      arch.id = only
+    } else {
+      // 同名多行：`id` 给**在跑的那一行**（唯一启用的那行）。这不是「挑最像的猜」——
+      // 按 name 查时读者最可能问的就是「哪个版本在跑」，而这个问题的答案是确定的；
+      // 同时 `patchRows` 与 `ambiguity` 都在场，停用那行不会被藏起来。
+      // 两个以上同时启用就没有唯一答案 ⇒ 不给 id，让逐行清单说话。
+      const enabledIds = [...new Set(rows.filter((r) => !r.disabled).map((r) => r.id))]
+      const running = enabledIds[0]
+      if (enabledIds.length === 1 && running !== undefined) arch.id = running
+    }
+    const resolved = resolvePatchStatus(arch.name, rows)
+    if (resolved?.ambiguity !== undefined) {
+      arch.ambiguity = resolved.ambiguity
+      arch.status = resolved.status
+    }
+  }
   return all.sort((a, b) => a.name.localeCompare(b.name))
 }
 
-/** Loader 条目（动态系统状态——按包名匹配，无需短 id 映射）。 */
+/** Loader 条目（动态系统状态）。**必须带 id**：name 在 patch 里不是唯一键（见 PatchRowRef）。 */
 export interface LoaderEntryState {
   name: string
+  /** patch 行 id（loader entry.options.id）——同名多行时它是唯一正确的匹配键。 */
+  id?: string
   enabled: boolean
 }
 
 /**
  * 用运行时 Loader 状态对齐插件档案（动态：插件启停立即反映，无需静态快照）。
  * 覆盖 buildRegistry 的静态推断（loader 是权威）。
+ *
+ * ⚠ **匹配键必须是 id，不是 name**（2026-11-12 根因，台账 lh-bfd83116）：
+ * 旧实现 `byName.set(e.name, e.enabled)` 按 name 折叠，**后写覆盖**。实测 web profile 的
+ * loader 里同时有 `ds-harness-remote`（host，enabled）与 `ds-harness-remote-tui`（tui，disabled）
+ * 两条 `options.name = 'ds-harness-remote'` 的条目 ⇒ 后者覆盖前者 ⇒ `plugin_inspect` 报
+ * `disabled`，而 host 版一直在跑（证据：`.watch-web.log` 里 `[dsh-remote]` 在本次启动标记之后
+ * 仍在打日志）。同一个错读数骗过两次，所以这里的判据是「同名场景下读数不歧义」：
+ *  · 有 id ⇒ 按 id 逐条匹配档案的 patchRows，**全部命中项**一起决定状态；
+ *  · 无 id ⇒ 名字下只有一条时按 name 匹配；多条时**不做后写覆盖**，状态冲突就写进 ambiguity。
  */
 export function alignWithLoader(archives: PluginArchive[], entries: LoaderEntryState[]): PluginArchive[] {
-  const byName = new Map<string, boolean>()
-  for (const e of entries) if (e.name) byName.set(e.name, e.enabled)
+  const byId = new Map<string, boolean>()
+  const byName = new Map<string, boolean[]>()
+  for (const e of entries) {
+    if (typeof e.id === 'string' && e.id !== '') byId.set(e.id, e.enabled)
+    const list = byName.get(e.name)
+    if (list === undefined) byName.set(e.name, [e.enabled])
+    else list.push(e.enabled)
+  }
   for (const arch of archives) {
-    const enabled = byName.get(arch.name)
-    if (enabled === undefined) continue
-    if (enabled) {
-      arch.status = 'mounted'
-      if (!arch.profiles.includes('web')) arch.profiles.push('web')
-    } else {
-      arch.status = 'disabled'
+    const ids = (arch.patchRows ?? []).map((r) => r.id)
+    const idStates: boolean[] = []
+    for (const id of ids) {
+      const v = byId.get(id)
+      if (v !== undefined) idStates.push(v)
     }
+    const states = idStates.length > 0 ? idStates : (byName.get(arch.name) ?? [])
+    if (states.length === 0) continue
+    const on = states.filter((s) => s).length
+    if (on === 0) {
+      arch.status = 'disabled'
+      continue
+    }
+    // 有一行在跑 ⇒ 插件在跑（loader 里那条启用条目是硬证据，不吃可能陈旧的 status）
+    arch.status = 'mounted'
+    if (!arch.profiles.includes('web')) arch.profiles.push('web')
+    if (on === states.length) continue
+    // 混合：多行里有的在跑、有的没跑 ⇒ 这是「同名多行」的常态，不是错误。
+    // 不猜单一状态（旧实现正是在这里静默选了没跑的那条 ⇒ 报 disabled 而 host 版在跑），
+    // 冲突本身写进 ambiguity 让人看见，并给出改用 id 的路。
+    const note = 'loader 同名条目启停不一致（' + states.map((s) => (s ? 'enabled' : 'disabled')).join(' · ') + '）——请用 id 查'
+    arch.ambiguity = arch.ambiguity === undefined ? note : arch.ambiguity + '；' + note
   }
   return archives
 }

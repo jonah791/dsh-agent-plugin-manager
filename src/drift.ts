@@ -16,7 +16,7 @@ export type DriftKind =
   | 'tools-empty-claimed'   // 声称有工具但档案清单为空
   | 'purpose-missing'       // 无用途描述（模型/人看不到它是干什么的）
   | 'unbuilt-mount'         // 声明挂载但未构建（构建产物缺失）
-  | 'tools-zero-unclaimed'  // 清单为空且未声称有工具（可疑：插件通常至少 1 个工具）
+  | 'tools-zero-unclaimed'  // 清单为空 ∧ 自述声称「提供/注册」工具（可疑：采集漏）
 
 export interface DriftFinding {
   name: string
@@ -68,6 +68,31 @@ export function declaresNoTools(purpose: string): boolean {
   return /不注册工具|无工具|不提供工具|不含工具|service[- ]?only|只提供\s*service|仅提供\s*service/i.test(purpose ?? '')
 }
 
+/**
+ * purpose 里是否**声称自己要（提供/注册/暴露）工具**——`tools-zero-unclaimed` 的收敛判据。
+ *
+ * 存在理由（2026-11-12 · 台账 lh-b012a19e）：这条检查原先只判「tools 为空 ∧ 未声称工具数 ∧
+ * 挂载中」，于是把 8 个**注入/服务型**插件全报成可疑。
+ *
+ * 实测读数（2026-11-12，8 个插件逐条核过）：8/8 的 `src/` 里**没有任何工具注册调用**
+ * （`grep -rE "defineTool|ctx\.tools\.register"` 命中 0，唯一命中是 `dsh-ask-evidence-gate`
+ *  `src/index.ts:22` 的一句注释）⇒ 它们的 `tools: []` 是设计，不是采集漏。
+ * 其中 6/8 的 purpose **根本没提「工具」**；另 2 个（`dsh-agent-repair`「同工具连续失败检测」、
+ * `dsh-ask-evidence-gate`「调用 ask 类工具时」）提到工具，但语义是**拿别人的工具当宾语**
+ * （观测/调用），不是「我提供工具」。
+ *
+ * ⇒ 判据不能只数「工具」二字的出现次数（那会把「调工具」读成「有工具」），而要认**注册语义**：
+ * `含工具字样` ∧ `含提供/注册/暴露…这类给出动词` 才算声称。**两个条件都缺 ⇒ 不报**。
+ * 边界（诚实）：动词表是有限枚举，写出「工具集：a, b」这类无动词声明会被漏掉——
+ * 但这种写法若真有工具，采集器会抓到清单（`actual > 0`），本检查根本不会触发；
+ * 它只在「源码扫出 0 个工具」时生效，所以漏判风险低，而误报是每次审计都出现的恒久噪音。
+ */
+export function claimsToolsInPurpose(purpose: string): boolean {
+  const p = purpose ?? ''
+  if (!/工具|\btools?\b/i.test(p)) return false // 完全没提工具 ⇒ 服务型常态，不报
+  return /注册|提供|暴露|新增|增加|附带|包含|拥有|具备|工具面|工具集|工具数/i.test(p)
+}
+
 export interface DriftOptions {
   /** 参与检查的来源（默认 ['self']）。**官方/第三方 bundle 不适用我的约定**——
    *  它们可以只提供 service/UI 而没有 purpose/工具；对它们套自研判据会产生大量假警报
@@ -99,8 +124,9 @@ export function detectDrift(archives: PluginArchive[], opts: DriftOptions = {}):
     if (a.built === false && (a.status === 'mounted' || (a.profiles?.length ?? 0) > 0)) {
       out.push({ name: a.name, kind: 'unbuilt-mount', detail: `声明挂载/有 profile 但未构建（status=${a.status}）` })
     }
-    if (declared === null && actual === 0 && a.status === 'mounted' && !declaresNoTools(a.purpose ?? '')) {
-      out.push({ name: a.name, kind: 'tools-zero-unclaimed', detail: '挂载中但未声称任何工具且清单为空（可能只提供 service/client UI——若不是，则是采集漏）' })
+    if (declared === null && actual === 0 && a.status === 'mounted'
+      && !declaresNoTools(a.purpose ?? '') && claimsToolsInPurpose(a.purpose ?? '')) {
+      out.push({ name: a.name, kind: 'tools-zero-unclaimed', detail: '挂载中且**自述声称提供工具**，但档案清单为空（采集漏？）' })
     }
   }
   return out

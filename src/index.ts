@@ -20,7 +20,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { TypertRemoteService, Remote } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/cordis-plugin-loader'
 import type {} from '@deepseek-ai/dsh-session'
-import { buildRegistry, alignWithLoader, readPatch, parsePatchRows, type PluginArchive } from './registry.ts'
+import { buildRegistry, alignWithLoader, readPatch, parsePatchRows, type PatchRow, type PluginArchive } from './registry.ts'
 import { detectDrift } from './drift.ts'
 // 规范自检（2026-10-30）：判据纯函数在 spec-check.ts，磁盘采集在 spec-scan.ts
 import { checkPluginSpec, summarizeSpec, formatSpecReport } from './spec-check.ts'
@@ -443,10 +443,42 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
   const findRow = (profileDir: string, nm: string) =>
     parsePatchRows(readPatch(profileDir)).find((r) => r.id === nm || r.name === nm) ?? null
 
+  /**
+   * 按 id 或 name 取**唯一**一行；同名多行时**拒绝猜**（台账 lh-bfd83116）。
+   *
+   * 旧写法 `rows.find(r => r.id === nm || r.name === nm)` 在同名多行时静默返回「文件中排第一的那行」，
+   * 而排第一的是谁取决于书写顺序 ⇒ 生命周期动作（停用/配置/卸载）可能打到**另一行**上。
+   * 现在：① 精确 id 命中唯一 ⇒ 用它；② 否则 name 唯一命中 ⇒ 用它；③ name 命中多行 ⇒ 报歧义并列出候选。
+   */
+  type RowResolution =
+    | { kind: 'ok'; row: PatchRow }
+    | { kind: 'none' }
+    | { kind: 'ambiguous'; message: string }
+  const resolveRow = (profileDir: string, nm: string): RowResolution => {
+    const rows = parsePatchRows(readPatch(profileDir))
+    const byId = rows.filter((r) => r.id === nm)
+    if (byId.length === 1) return { kind: 'ok', row: byId[0]! }
+    const byName = rows.filter((r) => r.name === nm)
+    if (byName.length === 1) return { kind: 'ok', row: byName[0]! }
+    if (byName.length === 0) return { kind: 'none' }
+    return {
+      kind: 'ambiguous',
+      message: 'name 有歧义：' + nm + ' 命中 ' + String(byName.length) + ' 行（'
+        + byName.map((r) => r.id + '=' + (r.disabled ? 'disabled' : 'enabled')).join(' · ')
+        + '）——请改用 id',
+    }
+  }
+
   const findArchive = (nm: string): PluginArchive | null => {
     // 与 list() 同源：用运行时 Loader 状态对齐（loader 是权威），避免吃陈旧 system-state 静态快照
     // 误判 mounted/unmounted（2026-08-30：compact 归一后 dsh-agent-compact 仍被旧快照标 mounted）
-    const arch = buildRegistry(selfPluginsDir, profilesDir).find((a) => a.name === nm)
+    //
+    // ⚠ 匹配面 = **包名 或 patch 行 id**（2026-11-12 · 台账 lh-bfd83116）：同名多行时
+    // 「name 有歧义，请用 id」这句建议必须真的能兑现——否则读者被指向一个查不到的东西。
+    const reg = buildRegistry(selfPluginsDir, profilesDir)
+    const arch = reg.find((a) => a.name === nm)
+      ?? reg.find((a) => a.id === nm)
+      ?? reg.find((a) => (a.patchRows ?? []).some((r) => r.id === nm))
     if (!arch) return null
     return alignWithLoader([arch], loaderSnapshot())[0] ?? null
   }
@@ -532,7 +564,7 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
     return { ok: true, note: '已挂载 ' + nm + '@' + profile + '；哨兵已写，web 将重启生效' }
   }
 
-  const loaderSnapshot = (): Array<{ name: string; enabled: boolean }> => {
+  const loaderSnapshot = (): Array<{ name: string; id?: string; enabled: boolean }> => {
     // 映射逻辑 = loaderSnapshotOf（ops-logic.ts，纯函数）；loader 访问本身仍在此处兜错
     try { return loaderSnapshotOf(loader.entries()) } catch { return [] }
   }
@@ -549,8 +581,10 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
       if (tp) return tp
       const profileDir = join(profilesDir, profile)
       if (!existsSync(join(profileDir, 'cordis.patch.yml'))) return { ok: false, error: 'profile 不存在: ' + profile }
-      const row = findRow(profileDir, nm)
-      if (!row) return { ok: false, error: '插件未挂载到 ' + profile + '（先 plugin_mount）' }
+      const rr = resolveRow(profileDir, nm)
+      if (rr.kind === 'ambiguous') return { ok: false, error: rr.message }
+      if (rr.kind === 'none') return { ok: false, error: '插件未挂载到 ' + profile + '（先 plugin_mount）' }
+      const row = rr.row
       if (row.disabled === !enabled) return { ok: false, error: '已是目标状态' }
       const r = patchSetDisabled(profileDir, row.id, !enabled)
       if (!r.ok) return { ok: false, error: 'patch 写入失败' }
@@ -574,8 +608,10 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
       const tp = refuseThirdParty(arch, 'unmount', nm, profile)
       if (tp) return tp
       const profileDir = join(profilesDir, profile)
-      const row = findRow(profileDir, nm)
-      if (!row) return { ok: false, error: '插件未挂载到 ' + profile }
+      const rr = resolveRow(profileDir, nm)
+      if (rr.kind === 'ambiguous') return { ok: false, error: rr.message }
+      if (rr.kind === 'none') return { ok: false, error: '插件未挂载到 ' + profile }
+      const row = rr.row
       const r = patchRemove(profileDir, row.id)
       if (!r.removed) return { ok: false, error: 'patch 移除失败' }
       let depBak: string | null = null
@@ -649,8 +685,9 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
       }
 
       // ── 执行 ①：若仍挂载，先走 remove（复用其预检与回滚保护）
-      const row = findRow(join(profilesDir, profile), nm)
-      if (row !== undefined && row !== null) {
+      const rr = resolveRow(join(profilesDir, profile), nm)
+      if (rr.kind === 'ambiguous') return { ...impact, ok: false, error: rr.message }
+      if (rr.kind === 'ok') {
         const r = await this.remove(nm, profile, caller)
         if (!r.ok) return { ...impact, ok: false, error: '卸载失败，未归档: ' + (r.error ?? '(无原因)') }
       }
@@ -691,9 +728,10 @@ export function createOps(ctx: Context, config: Config, loader: { entries(): Ite
       const tp = refuseThirdParty(arch, 'configure', nm, profile)
       if (tp) return tp
       const profileDir = join(profilesDir, profile)
-      const row = findRow(profileDir, nm)
-      if (!row) return { ok: false, error: '插件未挂载到 ' + profile }
-      const r = patchSetConfig(profileDir, row.id, cfg)
+      const rr = resolveRow(profileDir, nm)
+      if (rr.kind === 'ambiguous') return { ok: false, error: rr.message }
+      if (rr.kind === 'none') return { ok: false, error: '插件未挂载到 ' + profile }
+      const r = patchSetConfig(profileDir, rr.row.id, cfg)
       if (!r.ok) return { ok: false, error: 'patch 配置写入失败' }
       if (bin) {
         // D1：组合变更后预检必须强制完整试运行
@@ -861,6 +899,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'plugin_list',
+    deferLoading: true,
     description: '列出全部插件档案（来源/版本/用途/工具/挂载状态/配置摘要）——按「自研 / 官方 / 非官方」分组。可选按来源/状态过滤。',
     parameters: {
       source: { type: 'string', enum: ['self', 'official', 'third-party'], description: '来源过滤（self=自研, official=官方, third-party=非官方）' },
@@ -911,6 +950,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'plugin_update_check',
+    deferLoading: true,
     description: '第三方插件上游更新检查（只读·只报告）：枚举本机已装第三方插件 → 解析各自上游（spec 的 github 短写 / package.json repository / homepage）→ 查上游最新版本（npm registry latest → GitHub release → GitHub tag）→ 版本比较。**六档互不掩盖**：有更新 / 已最新 / 不可比（如 prerelease 标识不同）/ 无上游源 / 查询失败 / 已跳过——网络失败绝不读成「没更新」。不做自动升级：第三方升级要走「读上游 CHANGELOG → 换 pin → 重装 → 重启 → 黑盒验收」（§5.23）。',
     parameters: {
       only: { type: 'string', description: '只看某个插件名（可选）' },
@@ -955,6 +995,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'plugin_mcp_check',
+    deferLoading: true,
     description: 'MCP 服务器专项体检（只读·只报告）：枚举各 profile 里 `@deepseek-ai/dsh-mcp-client` 注册行 → 解析在跑的是哪个包/哪个版本（npx/bunx 的 args）→ 判定健康档位 → 可选查上游最新版。**为什么 MCP 需要单独一档**：它们不在 profile 依赖里（住在 cordis.patch.yml 的 config.args），所以依赖扫描器结构上看不见；且有四档互不掩盖的健康状态——`active`（在跑）/ `disabled-in-patch`（配置有意停用）/ **`denied-runtime`（★ 配置启用但被 DSH 兼容性预检静默停用——只往 stderr 打一行，不进上下文）**/ `unknown`（缺日志证据，不猜）。另标出**浮动版本**（`@latest`/无版本 ⇒ 配置里不存在确定版本，每次启动可能换）。不写任何配置、不动任何 pin。',
     parameters: {
       profile: { type: 'string', description: '只看某个 profile（缺省=全部）' },
@@ -1001,6 +1042,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'plugin_inspect',
+    deferLoading: true,
     description: '查看单个插件的深度档案（用途/工具/配置/挂载详情）。',
     parameters: { name: { type: 'string', required: true, description: '插件名' } },
     output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, plugin: { type: 'object', additionalProperties: true }, error: { type: 'string' } } }, render: (_a: any, v: any) => [{ type: 'text', text: v.ok ? JSON.stringify(v.plugin, null, 1) : (v.error ?? '') }] },
@@ -1012,7 +1054,8 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'plugin_audit',
-    description: '插件档案漂移审计（只读）：比对「自述」与「档案事实」——自述工具数 ≠ 清单长度 / 声称有工具但清单为空 / 无用途描述 / 声明挂载但未构建 / 挂载零工具未声称。抓的是「描述改了、工具面没同步」这类漂移（2026-09-17 事故：dsh-blue-team 档案 tools=[] 而自称 8 个、dsh-search-pro 列 1 而自称 23）。边界：**看不见运行时真实工具面**——那要靠 toolface status 与实调验证。',
+    deferLoading: true,
+    description: '插件档案漂移审计（只读）：比对「自述」与「档案事实」——自述工具数 ≠ 清单长度 / 声称有工具但清单为空 / 无用途描述 / 声明挂载但未构建 / 挂载零工具但自述「提供·注册」工具。抓的是「描述改了、工具面没同步」这类漂移（2026-09-17 事故：dsh-blue-team 档案 tools=[] 而自称 8 个、dsh-search-pro 列 1 而自称 23）。**service/注入型插件（只提供 service、或只在描述里「调用别人的工具」）的零工具是设计，不再报**（2026-11-12 实测 8 个此类假阳性）。边界：**看不见运行时真实工具面**——那要靠 toolface status 与实调验证。',
     parameters: { only: { type: 'string', description: '只看某个插件（可选）' } },
     output: {
       schema: {
@@ -1035,6 +1078,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'plugin_spec_check',
+    deferLoading: true,
     description: '自研插件规范自检（只读）：对 self-plugins 下每个插件跑九项机械判据——ESM 无例外 / 入口不指源码 / 宿主包不在 dependencies / bundle patch 文件存在 / 有测试 / README ≥200B / lib 存在 / lib 不旧于 src。**边界写在输出里**：DEFAULT_* 调参、waterfall 是否调 next()、disposer 齐全、branded id、Host-Client 面分离、Model-visible ⟺ logged 六项不在覆盖范围内——它们的「零命中」不代表合规。',
     parameters: { only: { type: 'string', description: '只看某个插件（可选）' } },
     output: {
@@ -1076,6 +1120,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'plugin_create',
+    deferLoading: true,
     description: '创建新插件（脚手架）：在 self-plugins 生成 package.json/tsconfig/src 骨架，随后可 plugin_mount 挂载。',
     parameters: {
       name: { type: 'string', required: true, description: '插件名（小写字母开头，仅 [a-z0-9-]）' },
@@ -1107,6 +1152,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'plugin_mount',
+    deferLoading: true,
     description: '挂载插件到 profile：写 link 依赖 + pnpm install + patch insert + 沙盒预检 + 哨兵重启（全自动闭环）。',
     parameters: {
       name: { type: 'string', required: true, description: '插件名（self-plugins 目录名）' },
@@ -1121,6 +1167,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'plugin_unmount',
+    deferLoading: true,
     description: '卸载插件（与 plugin_remove 相同）：patch 移除 + 依赖移除 + 预检 + 哨兵重启；保留插件数据目录。',
     parameters: {
       name: { type: 'string', required: true, description: '插件名' },
@@ -1134,6 +1181,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'plugin_purge',
+    deferLoading: true,
     description:
       '彻底退役一个自研插件：**先出影响面，再执行**。'
       + '为什么需要它：`plugin_unmount` 只清「挂载点 + profile 依赖」两处，实测（2026-10-03，14 个历史卸载样本）'
@@ -1221,6 +1269,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'plugin_configure',
+    deferLoading: true,
     description: '更新插件配置（patch config 整体替换）+ 预检 + 哨兵重启。',
     parameters: {
       name: { type: 'string', required: true, description: '插件名' },
