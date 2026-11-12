@@ -49,6 +49,7 @@ import {
   pluginRowId,
   publicArchive,
   purgeReportLines,
+  queryTerms,
   registryHasIdFromText,
   SCAFFOLD_PEER_DEPS,
   SCAFFOLD_PNPM_WORKSPACE,
@@ -926,25 +927,50 @@ export function apply(ctx: Context, config: Config): void {
         type: 'object', additionalProperties: false,
         properties: {
           count: { type: 'number', required: true },
+          note: { type: 'string' },
           hits: { type: 'array', required: true, items: { type: 'object', additionalProperties: true } },
         },
       },
       render: (a: any, v: any) => [{
         type: 'text',
-        text: toolFindLines(v.hits, String((a && a.query) ?? '')).join('\n'),
+        text: toolFindLines(v.hits, String((a && a.query) ?? ''), String(v.note ?? '')).join('\n'),
       }],
     },
     async execute(args: { query?: string }) {
       const all = ops.list()
-      const hits = findPluginsByToolQuery(
-        all.map((p) => ({
-          name: String(p.name), version: String(p.version), source: String(p.source),
-          purpose: String(p.purpose ?? ''), tools: (p.tools ?? []) as string[],
-        })),
-        args.query ?? '',
-      )
+      const query = args.query ?? ''
+      const plugins = all.map((p) => ({
+        name: String(p.name), version: String(p.version), source: String(p.source),
+        purpose: String(p.purpose ?? ''), tools: (p.tools ?? []) as string[],
+      }))
+      let hits = findPluginsByToolQuery(plugins, query)
+      let note = ''
+      // 多词整串零命中 ⇒ 逐词降级重试，取命中最多的一次。
+      // 事故（2026-11-12）：`tool_find("memory merge forget")` 回了「无命中」，我据此对主人断言
+      // 「库里没有删除工具」——而 memory_merge 一直在档案里。零命中必须是「查过了但这个词没有」，
+      // 绝不能读成「能力不存在」。
+      const terms = queryTerms(query)
+      if (hits.length === 0 && terms.length > 1) {
+        let best: { term: string; hits: ReturnType<typeof findPluginsByToolQuery> } | undefined
+        for (const term of terms) {
+          const found = findPluginsByToolQuery(plugins, term)
+          if (found.length > 0 && (best === undefined || found.length > best.hits.length)) {
+            best = { term, hits: found }
+          }
+        }
+        if (best !== undefined) {
+          hits = best.hits
+          note = `整串「${query}」无命中，已按单词「${best.term}」重试（命中 ${String(best.hits.length)} 个域）。`
+            + '工具发现按空格分词：多词之间是「任一命中」，零命中 ≠ 能力不存在——换更短、更常见的词，'
+            + '或 `toolface(action="status")` 看域清单（按名调用不需要 schema）。'
+        }
+      }
       // JSON 深拷贝 = 工具面安全投影（同 publicArchive 模式：剥离函数/undefined，带索引签名）
-      return { count: hits.length, hits: JSON.parse(JSON.stringify(hits)) as any }
+      return {
+        count: hits.length,
+        ...(note === '' ? {} : { note }),
+        hits: JSON.parse(JSON.stringify(hits)) as any,
+      }
     },
   }))
 

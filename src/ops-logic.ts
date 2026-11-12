@@ -645,27 +645,57 @@ function hit(haystack: string, needle: string): boolean {
   return haystack.toLowerCase().includes(needle.toLowerCase())
 }
 
+/**
+ * 把 query 切成检索词（空白 / 常见分隔符）；空 query ⇒ 空数组（概览语义）。
+ *
+ * 存在理由（2026-11-12 实测事故）：原实现按**整串**子串匹配，于是
+ * `tool_find("memory merge forget")` 返回「无命中」——而 `memory_merge` 一直在档案里。
+ * 我据此对主人断言「库里没有删除工具」。**指路牌说谎比没有指路牌更贵**：
+ * 没有它我会去查，有它我就停了。中文没有空格，切词对它等同原行为（不会回归）。
+ */
+export function queryTerms(query: string): string[] {
+  return query
+    .trim()
+    .split(/[\s,，、;；/|]+/)
+    .map((term) => term.trim())
+    .filter((term) => term.length > 0)
+}
+
 /** 按关键词筛插件（无命中 ⇒ 空数组，**不回落成全部**）。 */
 export function findPluginsByToolQuery(
   plugins: Array<{ name: string; version: string; source: string; purpose: string; tools: string[] }>,
   query: string,
 ): ToolFindHit[] {
-  const q = query.trim()
-  const out: ToolFindHit[] = []
+  const terms = queryTerms(query)
+  // 多词评分：命中词数（覆盖面）——同分时它决定排序，让「两个词都中」的域排在「只中一个」的前面
+  const scored: Array<{ entry: ToolFindHit; coverage: number }> = []
   for (const p of plugins) {
     // 空 query = 概览：**不算工具级命中**——否则 `hit()` 恒真会让每域都拿 score=2，
     // 概览与「工具级命中」就分不开了（2026-10-15 由 tests/ops-logic.test.mjs 的空 query 用例抓出）。
-    const matchedTools = q === '' ? [] : p.tools.filter((t) => hit(t, q))
-    const exactTool = q !== '' && p.tools.some((t) => t.toLowerCase() === q.toLowerCase())
-    const nameOrPurpose = hit(p.name, q) || hit(p.purpose, q)
+    const matchedTools = terms.length === 0
+      ? []
+      : p.tools.filter((t) => terms.some((term) => hit(t, term)))
+    const exactTool = terms.some((term) => p.tools.some((t) => t.toLowerCase() === term.toLowerCase()))
+    const nameOrPurpose = terms.length === 0
+      || terms.some((term) => hit(p.name, term) || hit(p.purpose, term))
     if (matchedTools.length === 0 && !nameOrPurpose) continue
     const score = exactTool ? 3 : (matchedTools.length > 0 ? 2 : 1)
-    out.push({
-      plugin: p.name, version: p.version, source: p.source, purpose: p.purpose,
-      tools: p.tools, matchedTools, score,
+    const coverage = terms.filter((term) => (
+      hit(p.name, term) || hit(p.purpose, term) || p.tools.some((t) => hit(t, term))
+    )).length
+    scored.push({
+      entry: {
+        plugin: p.name, version: p.version, source: p.source, purpose: p.purpose,
+        tools: p.tools, matchedTools, score,
+      },
+      coverage,
     })
   }
-  return out.sort((a, b) => (b.score - a.score) || a.plugin.localeCompare(b.plugin))
+  return scored
+    .sort((a, b) => (b.entry.score - a.entry.score)
+      || (b.coverage - a.coverage)
+      || a.entry.plugin.localeCompare(b.entry.plugin))
+    .map((s) => s.entry)
 }
 
 /**
@@ -687,14 +717,15 @@ export function firstSentence(text: string, max = 150): string {
   return out.length > max ? out.slice(0, max) + '…' : out
 }
 
-export function toolFindLines(hits: ToolFindHit[], query: string): string[] {
+export function toolFindLines(hits: ToolFindHit[], query: string, note = ''): string[] {
   const q = query.trim()
   if (hits.length === 0) {
     return q === ''
       ? ['工具发现：档案为空——没有任何插件登记工具。']
-      : [`工具发现：「${q}」无命中。`,
-         '⚠ 这是**有界搜索**：只说明档案里没有含该词的插件名/用途/工具名，**不等于该能力不存在**',
-         '   （可能是档案未登记，或它在一个未挂载的插件里）。换更短或更常见的词再试。']
+      : [`工具发现：「${q}」无命中（已按空格分词逐词查过）。`,
+         '⚠ 这是**有界搜索**：只说明档案里没有含这些词的插件名/用途/工具名，**不等于该能力不存在**',
+         '   （可能是档案未登记，或它在一个未挂载的插件里）。换更短或更常见的词再试；',
+         '   或直接 `toolface(action="status")` 看域清单——**按名调用不需要 schema**。']
   }
   const totalTools = hits.reduce((n, h) => n + h.tools.length, 0)
   const head = q === ''
@@ -711,6 +742,7 @@ export function toolFindLines(hits: ToolFindHit[], query: string): string[] {
       lines.push(`    ${tag}: ${list.length > 0 ? list.join(', ') : '(无工具登记)'}`)
     }
   }
+  if (note !== '') lines.push('', note)
   return lines
 }
 
